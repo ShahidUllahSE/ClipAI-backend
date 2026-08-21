@@ -8,6 +8,7 @@ import {
   applyExportPolish,
   makeTempSibling,
 } from '../../integrations/export-polish.service'
+import { probeDuration } from '../../integrations/ffmpeg'
 import { analyzeVideoUnderstanding } from '../../integrations/understanding.service'
 import { generateProjectName } from '../../integrations/naming.service'
 import { renderEditedVideo } from '../../integrations/render.service'
@@ -130,16 +131,51 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         summary: result.notes.join('; '),
       })
 
-      const polish = await applyExportPolish({
-        inputPath: cutPath,
-        outputPath,
-        options,
-        title: naming.title,
-        captionLine: result.transcript?.slice(0, 90),
-        captionsPath: result.captionsPath,
-        segmentSpeedApplied: result.segmentSpeedApplied,
-        durationSeconds: result.outputDurationSeconds,
-      })
+      let polishNotes: string[] = []
+      let polishDuration = result.outputDurationSeconds
+      const skipPolish =
+        process.env.SKIP_EXPORT_POLISH === '1' ||
+        process.env.SKIP_EXPORT_POLISH === 'true'
+
+      try {
+        if (skipPolish) {
+          fs.copyFileSync(cutPath, outputPath)
+          polishNotes = ['Skipped studio polish (SKIP_EXPORT_POLISH)']
+        } else {
+          const polish = await applyExportPolish({
+            inputPath: cutPath,
+            outputPath,
+            options,
+            title: naming.title,
+            captionLine: result.transcript?.slice(0, 90),
+            captionsPath: result.captionsPath,
+            segmentSpeedApplied: result.segmentSpeedApplied,
+            durationSeconds: result.outputDurationSeconds,
+          })
+          polishNotes = polish.notes
+          polishDuration = polish.durationSeconds
+        }
+
+        const outDur = await probeDuration(outputPath).catch(() => 0)
+        if (!outDur || outDur < 0.4) {
+          fs.copyFileSync(cutPath, outputPath)
+          polishNotes.push(
+            'Polish output unreadable — delivered edit cut instead',
+          )
+          polishDuration = result.outputDurationSeconds
+        }
+      } catch (polishError) {
+        fs.copyFileSync(cutPath, outputPath)
+        polishNotes = [
+          `Polish failed — delivered edit cut: ${
+            polishError instanceof Error
+              ? polishError.message.slice(0, 140)
+              : 'unknown'
+          }`,
+        ]
+        polishDuration = result.outputDurationSeconds
+      }
+
       try {
         fs.unlinkSync(cutPath)
       } catch {
@@ -153,7 +189,8 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         }
       }
 
-      const allNotes = [...result.notes, ...polish.notes]
+      const allNotes = [...result.notes, ...polishNotes]
+      const polish = { notes: polishNotes, durationSeconds: polishDuration }
 
       job.speechResult = {
         provider: result.provider,
@@ -276,22 +313,59 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         summary: result.summary,
       })
 
-      const polish = await applyExportPolish({
-        inputPath: cutPath,
-        outputPath,
-        options,
-        title: naming.title,
-        captionLine: result.summary?.slice(0, 90),
-        segmentSpeedApplied: result.segmentSpeedApplied,
-        durationSeconds: result.outputDurationSeconds,
-      })
+      let polishNotes: string[] = []
+      let polishDuration = result.outputDurationSeconds
+      const skipPolish =
+        process.env.SKIP_EXPORT_POLISH === '1' ||
+        process.env.SKIP_EXPORT_POLISH === 'true'
+
+      try {
+        if (skipPolish) {
+          fs.copyFileSync(cutPath, outputPath)
+          polishNotes = ['Skipped studio polish (SKIP_EXPORT_POLISH)']
+        } else {
+          const polish = await applyExportPolish({
+            inputPath: cutPath,
+            outputPath,
+            options,
+            title: naming.title,
+            captionLine: result.summary?.slice(0, 90),
+            segmentSpeedApplied: result.segmentSpeedApplied,
+            durationSeconds: result.outputDurationSeconds,
+          })
+          polishNotes = polish.notes
+          polishDuration = polish.durationSeconds
+        }
+
+        // Guard: never ship a 0-duration / unreadable MP4 to the client
+        const outDur = await probeDuration(outputPath).catch(() => 0)
+        if (!outDur || outDur < 0.4) {
+          fs.copyFileSync(cutPath, outputPath)
+          polishNotes.push(
+            'Polish output unreadable — delivered ASMR cut instead',
+          )
+          polishDuration = result.outputDurationSeconds
+        }
+      } catch (polishError) {
+        fs.copyFileSync(cutPath, outputPath)
+        polishNotes = [
+          `Polish failed — delivered ASMR cut: ${
+            polishError instanceof Error
+              ? polishError.message.slice(0, 140)
+              : 'unknown'
+          }`,
+        ]
+        polishDuration = result.outputDurationSeconds
+      }
+
       try {
         fs.unlinkSync(cutPath)
       } catch {
         /* ignore */
       }
 
-      const allNotes = [...result.notes, ...polish.notes]
+      const allNotes = [...result.notes, ...polishNotes]
+      const polish = { notes: polishNotes, durationSeconds: polishDuration }
 
       job.understandingResult = {
         provider: result.provider,
