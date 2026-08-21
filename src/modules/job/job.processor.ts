@@ -133,14 +133,16 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       let polishNotes: string[] = []
       let polishDuration = result.outputDurationSeconds
-      const skipPolish =
-        process.env.SKIP_EXPORT_POLISH === '1' ||
-        process.env.SKIP_EXPORT_POLISH === 'true'
+      const skipPolish = env.skipExportPolish
 
       try {
         if (skipPolish) {
           fs.copyFileSync(cutPath, outputPath)
-          polishNotes = ['Skipped studio polish (SKIP_EXPORT_POLISH)']
+          polishNotes = [
+            env.fastExport
+              ? 'FAST_EXPORT: skipped studio polish (cut only)'
+              : 'Skipped studio polish (SKIP_EXPORT_POLISH)',
+          ]
         } else {
           const polish = await applyExportPolish({
             inputPath: cutPath,
@@ -315,14 +317,16 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       let polishNotes: string[] = []
       let polishDuration = result.outputDurationSeconds
-      const skipPolish =
-        process.env.SKIP_EXPORT_POLISH === '1' ||
-        process.env.SKIP_EXPORT_POLISH === 'true'
+      const skipPolish = env.skipExportPolish
 
       try {
         if (skipPolish) {
           fs.copyFileSync(cutPath, outputPath)
-          polishNotes = ['Skipped studio polish (SKIP_EXPORT_POLISH)']
+          polishNotes = [
+            env.fastExport
+              ? 'FAST_EXPORT: skipped studio polish (cut only)'
+              : 'Skipped studio polish (SKIP_EXPORT_POLISH)',
+          ]
         } else {
           const polish = await applyExportPolish({
             inputPath: cutPath,

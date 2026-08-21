@@ -25,6 +25,17 @@ const envSchema = z.object({
     .optional()
     .default('true')
     .transform((v) => v !== 'false'),
+  /** Faster VPS exports: mock naming, skip polish, ultrafast encode */
+  FAST_EXPORT: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
+  SKIP_EXPORT_POLISH: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
   DEFAULT_SMTP_EMAIL: z
     .string()
     .optional()
@@ -50,4 +61,6 @@ export const env = {
   isDev: data.NODE_ENV !== 'production',
   isProd: data.NODE_ENV === 'production',
   mockAi: data.USE_MOCK_AI,
+  fastExport: data.FAST_EXPORT,
+  skipExportPolish: data.SKIP_EXPORT_POLISH || data.FAST_EXPORT,
 } as const

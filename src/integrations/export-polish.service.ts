@@ -2,6 +2,7 @@ import { execFile } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { promisify } from 'util'
+import { env } from '../config'
 import type { ProjectOptionsDto } from '../modules/project/project.types'
 import { FFMPEG, probeDuration, probeHasAudio } from './ffmpeg'
 
@@ -17,6 +18,12 @@ function escapeDrawText(text: string) {
 }
 
 function targetSize(aspect: ProjectOptionsDto['aspectRatio']) {
+  // Prefer 720p on FAST_EXPORT for much faster VPS encodes
+  if (env.fastExport) {
+    if (aspect === '1:1') return { w: 720, h: 720 }
+    if (aspect === '16:9') return { w: 1280, h: 720 }
+    return { w: 720, h: 1280 }
+  }
   if (aspect === '1:1') return { w: 1080, h: 1080 }
   if (aspect === '16:9') return { w: 1920, h: 1080 }
   return { w: 1080, h: 1920 }
@@ -224,7 +231,7 @@ export async function applyExportPolish(input: {
       }
       af.push(`atempo=${remaining.toFixed(3)}`)
     }
-    if (options.audioNormalize) {
+    if (options.audioNormalize && !env.fastExport) {
       af.push('loudnorm=I=-16:TP=-1.5:LRA=11')
       notes.push('Audio normalize')
     }
@@ -252,13 +259,15 @@ export async function applyExportPolish(input: {
       '-c:v',
       'libx264',
       '-preset',
-      'veryfast',
+      'ultrafast',
       '-crf',
-      '23',
+      env.fastExport ? '28' : '26',
       '-movflags',
       '+faststart',
       '-pix_fmt',
       'yuv420p',
+      '-threads',
+      '0',
       input.outputPath,
     )
     return args

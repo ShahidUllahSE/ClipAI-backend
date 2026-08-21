@@ -38,8 +38,7 @@ export async function generateProjectName(input: {
   transcript?: string
   summary?: string
 }): Promise<NamingResult> {
-  if (env.mockAi || !env.GEMINI_API_KEY) {
-    await delay(200)
+  if (env.mockAi || env.fastExport || !env.GEMINI_API_KEY) {
     return mockNaming(input.originalFilename, input.mode)
   }
 

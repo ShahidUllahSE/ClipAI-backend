@@ -4,6 +4,7 @@ import path from 'path'
 import { promisify } from 'util'
 import ffmpegPath from 'ffmpeg-static'
 import ffprobePath from 'ffprobe-static'
+import { env } from '../config'
 
 const execFileAsync = promisify(execFile)
 
@@ -276,7 +277,7 @@ export async function renderJumpCutVideo(input: {
     return
   }
 
-  const limited = cuts.slice(0, 40)
+  const limited = cuts.slice(0, env.fastExport ? 18 : 28)
   const filters: string[] = []
   const concatInputs: string[] = []
 
@@ -297,9 +298,13 @@ export async function renderJumpCutVideo(input: {
   })
 
   const n = limited.length
+  const scaleOut = env.fastExport
+    ? `;[vout]scale=-2:720:flags=fast_bilinear[vout2]`
+    : ''
+  const vOut = env.fastExport ? '[vout2]' : '[vout]'
   const filterComplex = useAudio
-    ? `${filters.join(';')};${concatInputs.join('')}concat=n=${n}:v=1:a=1[vout][aout]`
-    : `${filters.join(';')};${concatInputs.join('')}concat=n=${n}:v=1:a=0[vout]`
+    ? `${filters.join(';')};${concatInputs.join('')}concat=n=${n}:v=1:a=1[vout][aout]${scaleOut}`
+    : `${filters.join(';')};${concatInputs.join('')}concat=n=${n}:v=1:a=0[vout]${scaleOut}`
 
   const args = [
     '-y',
@@ -308,10 +313,10 @@ export async function renderJumpCutVideo(input: {
     '-filter_complex',
     filterComplex,
     '-map',
-    '[vout]',
+    vOut,
   ]
   if (useAudio) {
-    args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '128k')
+    args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '96k')
   }
   args.push(
     '-movflags',
@@ -319,9 +324,11 @@ export async function renderJumpCutVideo(input: {
     '-c:v',
     'libx264',
     '-preset',
-    'veryfast',
+    'ultrafast',
     '-crf',
-    '23',
+    env.fastExport ? '28' : '26',
+    '-threads',
+    '0',
     input.outputPath,
   )
 

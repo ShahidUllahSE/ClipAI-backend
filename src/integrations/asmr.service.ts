@@ -200,18 +200,22 @@ export async function processAsmrUnboxing(input: {
   let provider: AsmrResult['provider'] = 'ffmpeg'
 
   try {
-    const hint = await geminiProductHint({
-      filename: input.originalFilename,
-      durationSeconds: duration,
-    })
-    summary = hint.summary
-    category = hint.category
-    if (env.GEMINI_API_KEY) {
+    if (env.fastExport || !env.GEMINI_API_KEY) {
+      notes.push(
+        env.fastExport
+          ? 'FAST_EXPORT: skipped Gemini hint'
+          : 'No GEMINI_API_KEY — FFmpeg-only ASMR edit (still real)',
+      )
+    } else {
+      const hint = await geminiProductHint({
+        filename: input.originalFilename,
+        durationSeconds: duration,
+      })
+      summary = hint.summary
+      category = hint.category
       provider = 'ffmpeg+gemini'
       notes.push('Title/summary hint from Gemini')
       if (hint.titleHint) notes.push(`Title hint: ${hint.titleHint}`)
-    } else {
-      notes.push('No GEMINI_API_KEY — FFmpeg-only ASMR edit (still real)')
     }
   } catch (error) {
     notes.push(
