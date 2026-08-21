@@ -19,6 +19,35 @@ import { ProjectModel } from '../project/project.model'
 import type { ProjectOptionsDto } from '../project/project.types'
 import { JobModel } from './job.model'
 import { buildEditPlan } from './edit-plan'
+import {
+  isCloudinaryEnabled,
+  uploadLocalVideo,
+} from '../../integrations/cloudinary.service'
+
+async function publishOutputUrl(
+  localPath: string,
+  projectId: string,
+  fallbackUrl: string,
+  notes: string[],
+): Promise<string> {
+  if (!isCloudinaryEnabled()) return fallbackUrl
+  try {
+    const uploaded = await uploadLocalVideo({
+      localPath,
+      publicId: projectId,
+      folder: 'clipai/outputs',
+    })
+    notes.push('Delivered via Cloudinary CDN')
+    return uploaded.url
+  } catch (error) {
+    notes.push(
+      `Cloudinary upload skipped: ${
+        error instanceof Error ? error.message.slice(0, 120) : 'unknown'
+      }`,
+    )
+    return fallbackUrl
+  }
+}
 
 function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
   return {
@@ -194,6 +223,13 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       const allNotes = [...result.notes, ...polishNotes]
       const polish = { notes: polishNotes, durationSeconds: polishDuration }
 
+      const deliveryUrl = await publishOutputUrl(
+        outputPath,
+        projectId,
+        outputUrl,
+        allNotes,
+      )
+
       job.speechResult = {
         provider: result.provider,
         transcript: result.transcript,
@@ -203,7 +239,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       job.namingResult = naming
       job.renderResult = {
         provider: 'ffmpeg+clipai-polish',
-        outputUrl,
+        outputUrl: deliveryUrl,
         status: 'done',
         message: allNotes.join(' | '),
       }
@@ -234,7 +270,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         project.creditCharged = true
       }
 
-      project.outputUrl = outputUrl
+      project.outputUrl = deliveryUrl
       project.status = 'Completed'
       project.errorMessage = ''
       await project.save()
@@ -371,6 +407,13 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       const allNotes = [...result.notes, ...polishNotes]
       const polish = { notes: polishNotes, durationSeconds: polishDuration }
 
+      const deliveryUrl = await publishOutputUrl(
+        outputPath,
+        projectId,
+        outputUrl,
+        allNotes,
+      )
+
       job.understandingResult = {
         provider: result.provider,
         summary: result.summary,
@@ -385,7 +428,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       job.namingResult = naming
       job.renderResult = {
         provider: 'ffmpeg+clipai-polish',
-        outputUrl,
+        outputUrl: deliveryUrl,
         status: 'done',
         message: allNotes.join(' | '),
       }
@@ -416,7 +459,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         project.creditCharged = true
       }
 
-      project.outputUrl = outputUrl
+      project.outputUrl = deliveryUrl
       project.status = 'Completed'
       project.errorMessage = ''
       await project.save()

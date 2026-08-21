@@ -36,6 +36,11 @@ const envSchema = z.object({
     .optional()
     .default('false')
     .transform((v) => v === 'true' || v === '1'),
+  CLOUDINARY_URL: z.string().optional().default(''),
+  CLOUDINARY_CLOUD_NAME: z.string().optional().default(''),
+  CLOUDINARY_NAME: z.string().optional().default(''),
+  CLOUDINARY_API_KEY: z.string().optional().default(''),
+  CLOUDINARY_API_SECRET: z.string().optional().default(''),
   DEFAULT_SMTP_EMAIL: z
     .string()
     .optional()
@@ -63,4 +68,6 @@ export const env = {
   mockAi: data.USE_MOCK_AI,
   fastExport: data.FAST_EXPORT,
   skipExportPolish: data.SKIP_EXPORT_POLISH || data.FAST_EXPORT,
+  CLOUDINARY_CLOUD_NAME:
+    data.CLOUDINARY_CLOUD_NAME || data.CLOUDINARY_NAME || '',
 } as const
