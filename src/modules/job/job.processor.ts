@@ -9,6 +9,10 @@ import {
   makeTempSibling,
 } from '../../integrations/export-polish.service'
 import { probeDuration } from '../../integrations/ffmpeg'
+import {
+  planBeautifulCombine,
+  renderHighlightCombine,
+} from '../../integrations/ai-combine.service'
 import { analyzeVideoUnderstanding } from '../../integrations/understanding.service'
 import { generateProjectName } from '../../integrations/naming.service'
 import { renderEditedVideo } from '../../integrations/render.service'
@@ -98,6 +102,143 @@ export async function runJobPipeline(jobId: string, projectId: string) {
   try {
     await setStatus(projectId, jobId, 'Queued', 'Job queued')
     await delay(200)
+
+    // ——— AI Combine: Gemini vision picks beautiful moments + FFmpeg blend ———
+    if (project.mode === 'ai-combine') {
+      await setStatus(
+        projectId,
+        jobId,
+        'Analyzing',
+        'Sampling frames & finding beautiful moments',
+      )
+
+      const uploadA = await UploadModel.findById(project.uploadId)
+      const uploadB = project.secondaryUploadId
+        ? await UploadModel.findById(project.secondaryUploadId)
+        : null
+
+      if (!uploadA?.storagePath || !uploadB?.storagePath) {
+        throw new Error('Both source videos are required for AI Combine.')
+      }
+
+      const options = normalizeOptions(
+        project.options as unknown as ProjectOptionsDto,
+      )
+
+      const [durationA, durationB] = await Promise.all([
+        probeDuration(uploadA.storagePath),
+        probeDuration(uploadB.storagePath),
+      ])
+
+      const plan = await planBeautifulCombine({
+        pathA: uploadA.storagePath,
+        pathB: uploadB.storagePath,
+        filenameA: uploadA.originalFilename,
+        filenameB: uploadB.originalFilename,
+        durationA: durationA || uploadA.durationSeconds || 1,
+        durationB: durationB || uploadB.durationSeconds || 1,
+      })
+
+      await setStatus(
+        projectId,
+        jobId,
+        'Preparing edit',
+        `${plan.provider}: ${plan.clips.length} highlight moments`,
+      )
+
+      const outputName = `${project._id.toString()}.mp4`
+      const outputPath = path.resolve(
+        process.cwd(),
+        env.UPLOAD_DIR,
+        'outputs',
+        outputName,
+      )
+      const outputUrl = `${env.PUBLIC_API_URL}/uploads/outputs/${outputName}`
+
+      await setStatus(
+        projectId,
+        jobId,
+        'Rendering',
+        'Fast single-pass highlight render',
+      )
+
+      // Render straight to final path — skip slow second-pass polish for AI Combine.
+      const [combine, naming] = await Promise.all([
+        renderHighlightCombine({
+          pathA: uploadA.storagePath,
+          pathB: uploadB.storagePath,
+          outputPath,
+          plan,
+          keepAudio: options.keepAudio,
+        }),
+        generateProjectName({
+          originalFilename: project.originalFilename,
+          mode: project.mode,
+          summary: `${plan.titleHint}. ${plan.reason}`,
+        }),
+      ])
+
+      const polishNotes = ['Skipped studio polish (AI Combine fast path)']
+      const polishDuration = combine.outputDurationSeconds
+
+      const allNotes = [
+        ...combine.notes,
+        plan.reason,
+        plan.pacingNote,
+        ...polishNotes,
+      ]
+
+      const deliveryUrl = await publishOutputUrl(
+        outputPath,
+        projectId,
+        outputUrl,
+        allNotes,
+      )
+
+      job.namingResult = naming
+      job.renderResult = {
+        provider: `gemini-vision+ffmpeg-fast`,
+        outputUrl: deliveryUrl,
+        status: 'done',
+        message: allNotes.join(' | '),
+      }
+      await job.save()
+
+      project.analysis = {
+        combinePlan: plan,
+        notes: allNotes,
+        outputDurationSeconds: polishDuration,
+      }
+      project.editPlan = {
+        mode: 'ai-combine',
+        clips: plan.clips,
+        notes: allNotes,
+      }
+      project.generatedTitle = naming.title || plan.titleHint
+      project.title = naming.title || plan.titleHint
+      project.outputFilename = naming.outputFilename
+      project.durationSeconds = polishDuration
+
+      if (!project.creditCharged) {
+        await userService.useEditCredit(project.userId.toString())
+        project.creditCharged = true
+      }
+
+      project.outputUrl = deliveryUrl
+      project.status = 'Completed'
+      project.errorMessage = ''
+      await project.save()
+
+      job.status = 'Completed'
+      job.finishedAt = new Date()
+      job.steps.push({
+        status: 'Completed',
+        at: new Date(),
+        note: `AI Combine highlights via ${plan.provider} + fast FFmpeg`,
+      })
+      await job.save()
+      return
+    }
 
     // ——— Talking-head: real free FFmpeg pipeline ———
     if (project.mode === 'talking-head') {

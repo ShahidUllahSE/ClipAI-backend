@@ -21,6 +21,7 @@ interface ProjectLike {
   outputUrl?: string
   analysis?: Record<string, unknown> | null
   editPlan?: Record<string, unknown> | null
+  secondaryUploadId?: { toString(): string } | null
 }
 
 function slugify(text: string) {
@@ -38,7 +39,9 @@ export function suggestTitle(filename: string, mode: string) {
       ? 'Talking Head'
       : mode === 'rapid-cut'
         ? 'Rapid Cut'
-        : 'ASMR Unboxing'
+        : mode === 'ai-combine'
+          ? 'AI Combine'
+          : 'ASMR Unboxing'
   return `${base || 'Untitled'} — ${modeLabel}`.slice(0, 80)
 }
 
@@ -69,5 +72,8 @@ export function toPublicProject(project: ProjectLike): PublicProject {
     outputUrl: project.outputUrl || undefined,
     analysis: project.analysis ?? undefined,
     editPlan: project.editPlan ?? undefined,
+    secondaryUploadId: project.secondaryUploadId
+      ? project.secondaryUploadId.toString()
+      : null,
   }
 }

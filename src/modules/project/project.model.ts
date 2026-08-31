@@ -36,6 +36,7 @@ const optionsSchema = {
   fadeInOut: { type: Boolean, default: true },
   mirrorHorizontal: { type: Boolean, default: false },
   introTitleCard: { type: Boolean, default: true },
+  timelineJson: { type: Schema.Types.Mixed, default: null },
 }
 
 const projectSchema = new Schema(
@@ -50,6 +51,12 @@ const projectSchema = new Schema(
       type: Schema.Types.ObjectId,
       ref: 'Upload',
       required: true,
+    },
+    secondaryUploadId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Upload',
+      required: false,
+      default: null,
     },
     title: { type: String, required: true, trim: true },
     originalFilename: { type: String, required: true },

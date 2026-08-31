@@ -21,6 +21,7 @@ export interface ProjectOptionsDto {
   fadeInOut: boolean
   mirrorHorizontal: boolean
   introTitleCard: boolean
+  timelineJson?: unknown | null
 }
 
 export interface PublicProject {
@@ -43,4 +44,5 @@ export interface PublicProject {
   outputUrl?: string
   analysis?: Record<string, unknown> | null
   editPlan?: Record<string, unknown> | null
+  secondaryUploadId?: string | null
 }

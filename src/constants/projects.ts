@@ -1,4 +1,4 @@
-export const EDITING_MODES = ['talking-head', 'rapid-cut', 'asmr'] as const
+export const EDITING_MODES = ['talking-head', 'rapid-cut', 'asmr', 'ai-combine'] as const
 export type EditingModeId = (typeof EDITING_MODES)[number]
 
 export const PROJECT_STATUSES = [

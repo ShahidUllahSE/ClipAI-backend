@@ -23,7 +23,9 @@ function mockNaming(filename: string, mode: EditingModeId): NamingResult {
       ? 'Talking Head'
       : mode === 'rapid-cut'
         ? 'Rapid Cut'
-        : 'ASMR Unboxing'
+        : mode === 'ai-combine'
+          ? 'AI Combine'
+          : 'ASMR Unboxing'
   const title = `${base || 'Untitled'} — ${modeLabel}`.slice(0, 80)
   return {
     provider: 'mock',

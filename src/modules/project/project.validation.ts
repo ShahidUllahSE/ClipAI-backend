@@ -29,13 +29,24 @@ export const projectOptionsSchema = z.object({
   introTitleCard: z.boolean().default(true),
 })
 
-export const createProjectSchema = z.object({
-  uploadId: z.string().min(1),
-  mode: z.enum(EDITING_MODES),
-  options: projectOptionsSchema,
-  title: z.string().trim().max(120).optional(),
-  durationSeconds: z.number().min(0).max(20 * 60).optional(),
-})
+export const createProjectSchema = z
+  .object({
+    uploadId: z.string().min(1),
+    secondaryUploadId: z.string().min(1).optional(),
+    mode: z.enum(EDITING_MODES),
+    options: projectOptionsSchema,
+    title: z.string().trim().max(120).optional(),
+    durationSeconds: z.number().min(0).max(20 * 60).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.mode === 'ai-combine' && !data.secondaryUploadId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'AI Combine requires a second video (secondaryUploadId).',
+        path: ['secondaryUploadId'],
+      })
+    }
+  })
 
 export const updateProjectSchema = z
   .object({

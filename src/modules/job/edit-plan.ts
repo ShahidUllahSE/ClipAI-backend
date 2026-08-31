@@ -4,6 +4,31 @@ import type { EditPlan } from '../../integrations/render.service'
 import type { EditingModeId } from '../../constants/projects'
 import type { ProjectOptionsDto } from '../project/project.types'
 
+type TimelineClip = {
+  start?: number
+  length?: number
+  asset?: {
+    trim?: number
+    start?: number
+    length?: number
+    duration?: number
+    trimStart?: number
+  }
+}
+
+type TimelineJson = {
+  timeline?: {
+    tracks?: Array<{
+      clips?: TimelineClip[]
+    }>
+  }
+}
+
+function parseTimelineJson(value: unknown): TimelineJson | null {
+  if (!value || typeof value !== 'object') return null
+  return value as TimelineJson
+}
+
 export function buildEditPlan(input: {
   mode: EditingModeId
   options: ProjectOptionsDto
@@ -13,6 +38,43 @@ export function buildEditPlan(input: {
 }): EditPlan {
   const notes: string[] = [`Mode: ${input.mode}`]
   let cuts: Array<{ start: number; end: number }> = []
+
+  // If the user provided a manual Shotstack timeline JSON, prefer it
+  if (input.options?.timelineJson) {
+    try {
+      const tj = parseTimelineJson(input.options.timelineJson)
+      const tracks = Array.isArray(tj?.timeline?.tracks) ? tj.timeline.tracks : []
+      const parsedCuts: Array<{ start: number; end: number }> = []
+      for (const track of tracks) {
+        const clips = Array.isArray(track.clips) ? track.clips : []
+        for (const clip of clips) {
+          const asset = clip.asset ?? {}
+          const srcTrim =
+            asset.trim ?? asset.start ?? clip.start ?? asset?.trimStart ?? 0
+          const length = clip.length ?? asset.length ?? asset.duration ?? null
+          if (length == null) continue
+          const start = Number(srcTrim)
+          const end = Number(start + Number(length))
+          if (!Number.isNaN(start) && !Number.isNaN(end)) {
+            parsedCuts.push({ start, end })
+          }
+        }
+      }
+      if (parsedCuts.length) {
+        notes.push('Using user-provided timeline JSON')
+        cuts = parsedCuts
+        return {
+          cuts,
+          captions: input.options.captions && input.mode === 'talking-head',
+          aspectRatio: input.options.aspectRatio,
+          keepAudio: input.options.keepAudio,
+          notes,
+        }
+      }
+    } catch (e) {
+      notes.push('Failed to parse timelineJson')
+    }
+  }
 
   if (input.mode === 'talking-head' && input.speech) {
     notes.push(`Speech provider: ${input.speech.provider}`)

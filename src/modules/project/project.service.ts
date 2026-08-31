@@ -32,6 +32,7 @@ function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
     fadeInOut: raw.fadeInOut ?? true,
     mirrorHorizontal: raw.mirrorHorizontal ?? false,
     introTitleCard: raw.introTitleCard ?? true,
+    timelineJson: raw.timelineJson ?? null,
   }
 }
 
@@ -56,6 +57,7 @@ export const projectService = {
     userId: string,
     input: {
       uploadId: string
+      secondaryUploadId?: string
       mode: EditingModeId
       options: ProjectOptionsDto
       title?: string
@@ -63,10 +65,22 @@ export const projectService = {
     },
   ): Promise<{ project: PublicProject }> {
     const upload = await uploadService.getOwned(input.uploadId, userId)
+    const secondary =
+      input.secondaryUploadId
+        ? await uploadService.getOwned(input.secondaryUploadId, userId)
+        : null
+
+    if (input.mode === 'ai-combine' && !secondary) {
+      throw new AppError(
+        'AI Combine requires a second video upload.',
+        HTTP_STATUS.BAD_REQUEST,
+      )
+    }
+
     const durationSeconds =
       input.durationSeconds && input.durationSeconds > 0
         ? input.durationSeconds
-        : upload.durationSeconds
+        : upload.durationSeconds + (secondary?.durationSeconds ?? 0)
 
     if (input.durationSeconds && input.durationSeconds > 0) {
       upload.durationSeconds = input.durationSeconds
@@ -80,9 +94,12 @@ export const projectService = {
     const project = await ProjectModel.create({
       userId,
       uploadId: upload._id,
+      secondaryUploadId: secondary?._id ?? null,
       title: generatedTitle,
-      originalFilename: upload.originalFilename,
-      fileSize: upload.fileSize,
+      originalFilename: secondary
+        ? `${upload.originalFilename} + ${secondary.originalFilename}`
+        : upload.originalFilename,
+      fileSize: upload.fileSize + (secondary?.fileSize ?? 0),
       durationSeconds,
       mimeType: upload.mimeType,
       mode: input.mode,
