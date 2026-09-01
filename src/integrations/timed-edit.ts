@@ -134,32 +134,97 @@ export function wordsToCaptionCues(
   return cues.filter((c) => c.text.length > 0)
 }
 
-/** Keep each spoken phrase as one cut so a thought is not sliced mid-sentence. */
-export function cutsFromPhrases(
-  phrases: CaptionCue[],
-  durationSeconds: number,
-): Array<{ start: number; end: number }> {
+/** Group words into spoken thoughts (sentence / pause), not 5-word chunks. */
+export function wordsToSentenceCues(words: TimedWord[]): CaptionCue[] {
+  if (!words.length) return []
+  const cues: CaptionCue[] = []
+  let bucket: TimedWord[] = []
+
+  const flush = () => {
+    if (!bucket.length) return
+    cues.push({
+      start: bucket[0].start,
+      end: Math.max(bucket[bucket.length - 1].end, bucket[0].start + 0.35),
+      text: bucket
+        .map((w) => w.word.trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    })
+    bucket = []
+  }
+
+  for (const w of words) {
+    if (bucket.length) {
+      const gap = w.start - bucket[bucket.length - 1].end
+      const span = w.end - bucket[0].start
+      if (gap >= 0.3 || bucket.length >= 10 || span >= 3.2) flush()
+    }
+    bucket.push(w)
+    if (/[.?!]["')\]]*$/.test(w.word.trim()) && bucket.length >= 2) flush()
+  }
+  flush()
+  return cues.filter((c) => c.text.length > 0)
+}
+
+export function mergeSpokenPhrases(phrases: CaptionCue[]): CaptionCue[] {
   if (!phrases.length) return []
   const merged: CaptionCue[] = []
   for (const phrase of phrases) {
     const prev = merged[merged.length - 1]
-    const words = phrase.text.split(/\s+/).filter(Boolean).length
-    if (
-      prev &&
-      (phrase.start - prev.end < 0.28 ||
-        (phrase.end - prev.start < 1.5 &&
-          prev.text.split(/\s+/).length + words <= 10))
-    ) {
+    const gap = prev ? phrase.start - prev.end : 99
+    const dur = phrase.end - phrase.start
+    if (prev && (gap < 0.14 || (dur < 0.4 && gap < 0.35))) {
       prev.end = Math.max(prev.end, phrase.end)
       prev.text = `${prev.text} ${phrase.text}`.replace(/\s+/g, ' ').trim()
     } else {
       merged.push({ ...phrase })
     }
   }
-  return merged.map((phrase) => ({
-    start: Math.max(0, phrase.start - 0.05),
-    end: Math.min(durationSeconds, Math.max(phrase.start + 0.4, phrase.end + 0.12)),
+  return merged
+}
+
+/**
+ * Keep each spoken thought as one cut. Drop pauses between thoughts.
+ */
+export function cutsFromPhrases(
+  phrases: CaptionCue[],
+  durationSeconds: number,
+): Array<{ start: number; end: number }> {
+  return mergeSpokenPhrases(phrases).map((phrase) => ({
+    start: Math.max(0, phrase.start),
+    end: Math.min(
+      durationSeconds,
+      Math.max(phrase.start + 0.28, phrase.end + 0.04),
+    ),
   }))
+}
+
+/** One caption per keep-cut, using the spoken thought that lives in that cut. */
+export function alignCaptionsToCuts(
+  phrases: CaptionCue[],
+  cuts: SpeedCut[],
+): CaptionCue[] {
+  const out: CaptionCue[] = []
+  let cursor = 0
+  for (const cut of cuts) {
+    const speed = cut.speed > 0 ? cut.speed : 1
+    const cutDur = Math.max(0, cut.end - cut.start)
+    const mid = (cut.start + cut.end) / 2
+    const phrase =
+      phrases.find((p) => mid >= p.start && mid <= p.end) ||
+      phrases.find((p) => p.end > cut.start && p.start < cut.end)
+    if (phrase?.text.trim()) {
+      out.push({
+        text: phrase.text.trim(),
+        start: cursor,
+        end: cursor + cutDur / speed,
+      })
+    }
+    cursor += cutDur / speed
+  }
+  return out
 }
 
 export function remapCuesToOutput(

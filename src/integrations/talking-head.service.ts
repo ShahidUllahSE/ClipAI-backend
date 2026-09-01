@@ -16,10 +16,13 @@ import {
 import {
   assFontSizeFromUi,
   assignSegmentSpeeds,
-  remapCuesToOutput,
+  cutsFromPhrases,
+  mergeSpokenPhrases,
+  alignCaptionsToCuts,
   remapWordsToOutput,
   totalOutputDuration,
   wordsToCaptionCues,
+  wordsToSentenceCues,
   writeAssFile,
   type CaptionCue,
   type SpeedCut,
@@ -352,7 +355,9 @@ export async function processTalkingHead(input: {
       const stt = await transcribeSourceAudio(input.inputPath, duration, tempDir)
       transcript = stt.transcript
       words = stt.words
-      phrases = stt.phrases.length ? stt.phrases : wordsToCaptionCues(words)
+      phrases = words.length
+        ? mergeSpokenPhrases(wordsToSentenceCues(words))
+        : mergeSpokenPhrases(stt.phrases)
       provider = 'ffmpeg+groq'
       notes.push(
         duration > GROQ_CHUNK_SECONDS + 30
@@ -360,11 +365,26 @@ export async function processTalkingHead(input: {
           : 'Transcript + phrase timings from Groq Whisper',
       )
 
-      baseCuts = cutsFromWords(words, duration, input.silenceSensitivity)
+      baseCuts = cutsFromPhrases(phrases, duration)
       if (baseCuts.length) {
         notes.push(
-          `Jump cuts from speech gaps (${input.silenceSensitivity}): ${baseCuts.length} keep-segments`,
+          `Jump cuts on spoken thoughts: ${baseCuts.length} keep-segments`,
         )
+      }
+      if (
+        !baseCuts.length ||
+        totalKeepSeconds(baseCuts) > duration * 0.92
+      ) {
+        const gapCuts = cutsFromWords(words, duration, input.silenceSensitivity)
+        if (
+          gapCuts.length &&
+          (!baseCuts.length || totalKeepSeconds(gapCuts) < totalKeepSeconds(baseCuts))
+        ) {
+          baseCuts = gapCuts
+          notes.push(
+            `Speech-gap fallback (${input.silenceSensitivity}): ${baseCuts.length} keep-segments`,
+          )
+        }
       }
     } else {
       notes.push('No GROQ_API_KEY — using FFmpeg silence detection only')
@@ -427,10 +447,10 @@ export async function processTalkingHead(input: {
   let captionsBurned = false
   const wantCaptions = input.captions !== false
   if (wantCaptions) {
-    const sourceCues = words.length
-      ? wordsToCaptionCues(remapWordsToOutput(words, cuts))
-      : phrases.length
-        ? remapCuesToOutput(phrases, cuts)
+    const sourceCues = phrases.length
+      ? alignCaptionsToCuts(phrases, cuts)
+      : words.length
+        ? wordsToCaptionCues(remapWordsToOutput(words, cuts))
         : []
     const cues = sourceCues
     if (cues.length) {

@@ -554,7 +554,7 @@ function motionScaleCrop(
       const base = apply(1, 0.5, 0.5)
       return index === 0 ? base : `${base},fade=t=in:st=0:d=${fade}`
     }
-    return shot === 'wide' ? apply(1, 0.5, 0.5) : apply(1.1, 0.5, 0.5)
+    return shot === 'wide' ? apply(1, 0.5, 0.5) : apply(1.04, 0.5, 0.46)
   }
 
   const speaker = {
