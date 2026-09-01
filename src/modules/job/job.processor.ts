@@ -6,9 +6,11 @@ import { processTalkingHead } from '../../integrations/talking-head.service'
 import { processAsmrUnboxing } from '../../integrations/asmr.service'
 import {
   applyExportPolish,
+  burnTimedCaptions,
   makeTempSibling,
 } from '../../integrations/export-polish.service'
-import { probeDuration } from '../../integrations/ffmpeg'
+import { prepareExportCaptionsSrt } from '../../integrations/caption-transcribe.service'
+import { probeDuration, type ClipMotion } from '../../integrations/ffmpeg'
 import {
   planBeautifulCombine,
   renderHighlightCombine,
@@ -57,6 +59,9 @@ function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
   return {
     captions: raw.captions ?? true,
     captionPosition: raw.captionPosition ?? 'bottom',
+    captionFontFamily: raw.captionFontFamily ?? 'arial',
+    captionFontSize: raw.captionFontSize ?? 22,
+    captionColor: raw.captionColor ?? 'white',
     aspectRatio: raw.aspectRatio ?? '9:16',
     silenceSensitivity: raw.silenceSensitivity ?? 'medium',
     pacing: raw.pacing ?? 'fast',
@@ -70,7 +75,119 @@ function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
     fadeInOut: raw.fadeInOut ?? true,
     mirrorHorizontal: raw.mirrorHorizontal ?? false,
     introTitleCard: raw.introTitleCard ?? true,
+    timelineJson: raw.timelineJson ?? null,
   }
+}
+
+async function finalizeExport(input: {
+  projectId: string
+  cutPath: string
+  outputPath: string
+  options: ProjectOptionsDto
+  title?: string
+  captionLine?: string
+  existingCaptionsPath?: string
+  segmentSpeedApplied?: boolean
+  durationSeconds: number
+}): Promise<{ notes: string[]; durationSeconds: number; captionsPath?: string }> {
+  const captionsPath = await prepareExportCaptionsSrt({
+    enabled: input.options.captions,
+    videoPath: input.cutPath,
+    srtPath: path.join(
+      path.dirname(input.outputPath),
+      `${input.projectId}.captions.srt`,
+    ),
+    existingPath: input.existingCaptionsPath,
+  })
+
+  if (env.skipExportPolish || input.durationSeconds > 120) {
+    if (captionsPath) {
+      try {
+        await burnTimedCaptions({
+          inputPath: input.cutPath,
+          outputPath: input.outputPath,
+          captionsPath,
+          options: input.options,
+        })
+        return {
+          notes: [
+            env.fastExport
+              ? 'FAST_EXPORT: cut + burned captions'
+              : input.durationSeconds > 120
+                ? 'Long-form: skipped studio polish — burned captions'
+                : 'Skipped studio polish — burned captions',
+          ],
+          durationSeconds: input.durationSeconds,
+          captionsPath,
+        }
+      } catch (error) {
+        fs.copyFileSync(input.cutPath, input.outputPath)
+        return {
+          notes: [
+            `Caption burn skipped: ${
+              error instanceof Error ? error.message.slice(0, 120) : 'ffmpeg error'
+            }`,
+          ],
+          durationSeconds: input.durationSeconds,
+          captionsPath,
+        }
+      }
+    }
+
+    fs.copyFileSync(input.cutPath, input.outputPath)
+    return {
+      notes: [
+        env.fastExport
+          ? 'FAST_EXPORT: skipped studio polish (cut only)'
+          : input.durationSeconds > 120
+            ? 'Long-form: skipped studio polish (cut only)'
+            : 'Skipped studio polish (SKIP_EXPORT_POLISH)',
+      ],
+      durationSeconds: input.durationSeconds,
+    }
+  }
+
+  const polish = await applyExportPolish({
+    inputPath: input.cutPath,
+    outputPath: input.outputPath,
+    options: input.options,
+    title: input.title,
+    captionLine: input.captionLine,
+    captionsPath,
+    segmentSpeedApplied: input.segmentSpeedApplied,
+    durationSeconds: input.durationSeconds,
+  })
+  return { ...polish, captionsPath }
+}
+
+function unlinkQuiet(filePath?: string) {
+  if (!filePath) return
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+  } catch {
+    /* ignore */
+  }
+}
+
+function clipMotionFromTimeline(timelineJson: unknown): ClipMotion {
+  const json = timelineJson as {
+    timeline?: { transition?: { type?: string } | null }
+    output?: { transition?: { type?: string } | null }
+  } | null
+  const type = json?.timeline?.transition?.type ?? json?.output?.transition?.type
+  if (type === 'none') return 'none'
+  if (
+    type === 'zoom-in' ||
+    type === 'zoom-out' ||
+    type === 'ken-burns' ||
+    type === 'fade' ||
+    type === 'punch'
+  ) {
+    return type
+  }
+  if (type === 'flash' || type === 'blur') return 'punch'
+  if (type === 'slide-left' || type === 'slide-right') return 'fade'
+  return 'punch'
 }
 
 async function setStatus(
@@ -283,15 +400,20 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         silenceSensitivity: options.silenceSensitivity,
         keepAudio: options.keepAudio,
         speedRamp: options.speedRamp,
-        captions: options.captions,
+        captions: options.captions !== false,
+        captionOptions: options,
         durationSeconds: project.durationSeconds,
+        motion: clipMotionFromTimeline(options.timelineJson),
+        aspectRatio: options.aspectRatio,
       })
 
       await setStatus(
         projectId,
         jobId,
         'Rendering',
-        'Applying ClipAI studio polish',
+        options.captions
+          ? 'Adding captions to the export'
+          : 'Applying ClipAI studio polish',
       )
 
       const naming = await generateProjectName({
@@ -303,29 +425,29 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       let polishNotes: string[] = []
       let polishDuration = result.outputDurationSeconds
-      const skipPolish = env.skipExportPolish
+      let exportCaptionsPath: string | undefined
 
       try {
-        if (skipPolish) {
+        if (result.captionsBurned) {
           fs.copyFileSync(cutPath, outputPath)
-          polishNotes = [
-            env.fastExport
-              ? 'FAST_EXPORT: skipped studio polish (cut only)'
-              : 'Skipped studio polish (SKIP_EXPORT_POLISH)',
-          ]
+          polishNotes = ['Talking-head cut with burned captions']
+          polishDuration = result.outputDurationSeconds
+          exportCaptionsPath = result.captionsPath
         } else {
-          const polish = await applyExportPolish({
-            inputPath: cutPath,
+          const finalized = await finalizeExport({
+            projectId,
+            cutPath,
             outputPath,
-            options,
+            options: { ...options, captions: true },
             title: naming.title,
             captionLine: result.transcript?.slice(0, 90),
-            captionsPath: result.captionsPath,
+            existingCaptionsPath: result.captionsPath,
             segmentSpeedApplied: result.segmentSpeedApplied,
             durationSeconds: result.outputDurationSeconds,
           })
-          polishNotes = polish.notes
-          polishDuration = polish.durationSeconds
+          polishNotes = finalized.notes
+          polishDuration = finalized.durationSeconds
+          exportCaptionsPath = finalized.captionsPath
         }
 
         const outDur = await probeDuration(outputPath).catch(() => 0)
@@ -348,18 +470,9 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         polishDuration = result.outputDurationSeconds
       }
 
-      try {
-        fs.unlinkSync(cutPath)
-      } catch {
-        /* ignore */
-      }
-      if (result.captionsPath) {
-        try {
-          fs.unlinkSync(result.captionsPath)
-        } catch {
-          /* ignore */
-        }
-      }
+      unlinkQuiet(cutPath)
+      unlinkQuiet(result.captionsPath)
+      unlinkQuiet(exportCaptionsPath)
 
       const allNotes = [...result.notes, ...polishNotes]
       const polish = { notes: polishNotes, durationSeconds: polishDuration }
@@ -483,7 +596,9 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         projectId,
         jobId,
         'Rendering',
-        'Applying ClipAI studio polish',
+        options.captions
+          ? 'Adding captions to the export'
+          : 'Applying ClipAI studio polish',
       )
 
       const naming = await generateProjectName({
@@ -494,31 +609,23 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       let polishNotes: string[] = []
       let polishDuration = result.outputDurationSeconds
-      const skipPolish = env.skipExportPolish
+      let exportCaptionsPath: string | undefined
 
       try {
-        if (skipPolish) {
-          fs.copyFileSync(cutPath, outputPath)
-          polishNotes = [
-            env.fastExport
-              ? 'FAST_EXPORT: skipped studio polish (cut only)'
-              : 'Skipped studio polish (SKIP_EXPORT_POLISH)',
-          ]
-        } else {
-          const polish = await applyExportPolish({
-            inputPath: cutPath,
-            outputPath,
-            options,
-            title: naming.title,
-            captionLine: result.summary?.slice(0, 90),
-            segmentSpeedApplied: result.segmentSpeedApplied,
-            durationSeconds: result.outputDurationSeconds,
-          })
-          polishNotes = polish.notes
-          polishDuration = polish.durationSeconds
-        }
+        const finalized = await finalizeExport({
+          projectId,
+          cutPath,
+          outputPath,
+          options,
+          title: naming.title,
+          captionLine: result.summary?.slice(0, 90),
+          segmentSpeedApplied: result.segmentSpeedApplied,
+          durationSeconds: result.outputDurationSeconds,
+        })
+        polishNotes = finalized.notes
+        polishDuration = finalized.durationSeconds
+        exportCaptionsPath = finalized.captionsPath
 
-        // Guard: never ship a 0-duration / unreadable MP4 to the client
         const outDur = await probeDuration(outputPath).catch(() => 0)
         if (!outDur || outDur < 0.4) {
           fs.copyFileSync(cutPath, outputPath)
@@ -539,11 +646,8 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         polishDuration = result.outputDurationSeconds
       }
 
-      try {
-        fs.unlinkSync(cutPath)
-      } catch {
-        /* ignore */
-      }
+      unlinkQuiet(cutPath)
+      unlinkQuiet(exportCaptionsPath)
 
       const allNotes = [...result.notes, ...polishNotes]
       const polish = { notes: polishNotes, durationSeconds: polishDuration }

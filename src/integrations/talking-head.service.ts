@@ -1,23 +1,30 @@
 import fs from 'fs'
 import path from 'path'
 import { env } from '../config'
-import type { SilenceSensitivity } from './ffmpeg'
+import type { ProjectOptionsDto } from '../modules/project/project.types'
 import {
   detectSilenceRanges,
-  extractAudioWav,
+  extractAudioForStt,
+  extractAudioSlice,
   probeDuration,
   probeHasAudio,
   renderJumpCutVideo,
   silenceToKeepCuts,
+  type ClipMotion,
+  type SilenceSensitivity,
 } from './ffmpeg'
 import {
+  assFontSizeFromUi,
   assignSegmentSpeeds,
+  remapCuesToOutput,
   remapWordsToOutput,
   totalOutputDuration,
   wordsToCaptionCues,
-  writeSrtFile,
+  writeAssFile,
+  type CaptionCue,
   type SpeedCut,
 } from './timed-edit'
+import { burnTimedCaptions } from './export-polish.service'
 
 export interface TalkingHeadResult {
   provider: 'ffmpeg' | 'ffmpeg+groq'
@@ -28,6 +35,7 @@ export interface TalkingHeadResult {
   silenceRanges: Array<{ start: number; end: number }>
   cuts: SpeedCut[]
   captionsPath?: string
+  captionsBurned: boolean
   segmentSpeedApplied: boolean
   outputPath: string
   outputUrl: string
@@ -38,11 +46,11 @@ export interface TalkingHeadResult {
 function gapThreshold(level: SilenceSensitivity) {
   switch (level) {
     case 'light':
-      return 0.9
+      return 0.72
     case 'aggressive':
-      return 0.35
+      return 0.28
     default:
-      return 0.55
+      return 0.38
   }
 }
 
@@ -70,31 +78,42 @@ export function cutsFromWords(
     silenceRanges.push({ start: last.end, end: durationSeconds })
   }
 
-  return silenceToKeepCuts(silenceRanges, durationSeconds, 0.15)
+  return silenceToKeepCuts(silenceRanges, durationSeconds, 0.12).map((cut) => ({
+    start: cut.start,
+    end: Math.max(cut.start + 0.16, cut.end - 0.04),
+  }))
 }
 
 function totalKeepSeconds(cuts: Array<{ start: number; end: number }>) {
   return cuts.reduce((sum, c) => sum + Math.max(0, c.end - c.start), 0)
 }
 
-async function transcribeWithGroq(wavPath: string): Promise<{
+const GROQ_CHUNK_SECONDS = 8 * 60
+
+async function transcribeWithGroq(
+  audioPath: string,
+  mimeType: string,
+  offsetSeconds = 0,
+): Promise<{
   transcript: string
   words: Array<{ word: string; start: number; end: number }>
+  phrases: CaptionCue[]
 }> {
   if (!env.GROQ_API_KEY) {
-    return { transcript: '', words: [] }
+    return { transcript: '', words: [], phrases: [] }
   }
 
-  const bytes = fs.readFileSync(wavPath)
+  const bytes = fs.readFileSync(audioPath)
   const form = new FormData()
   form.append(
     'file',
-    new Blob([new Uint8Array(bytes)], { type: 'audio/wav' }),
-    path.basename(wavPath),
+    new Blob([new Uint8Array(bytes)], { type: mimeType }),
+    path.basename(audioPath),
   )
-  form.append('model', 'whisper-large-v3')
+  form.append('model', 'whisper-large-v3-turbo')
   form.append('response_format', 'verbose_json')
   form.append('timestamp_granularities[]', 'word')
+  form.append('timestamp_granularities[]', 'segment')
 
   const response = await fetch(
     'https://api.groq.com/openai/v1/audio/transcriptions',
@@ -108,15 +127,73 @@ async function transcribeWithGroq(wavPath: string): Promise<{
   )
 
   if (!response.ok) {
+    const detail = await response.text()
+    if (/whisper-large-v3-turbo/i.test(detail)) {
+      return transcribeWithGroqLegacy(audioPath, mimeType, offsetSeconds)
+    }
+    throw new Error(`Groq STT failed: ${detail}`)
+  }
+
+  return parseGroqTranscript(
+    (await response.json()) as {
+      text?: string
+      words?: GroqWord[]
+      segments?: GroqSegment[]
+    },
+    offsetSeconds,
+  )
+}
+
+async function transcribeWithGroqLegacy(
+  audioPath: string,
+  mimeType: string,
+  offsetSeconds: number,
+) {
+  const bytes = fs.readFileSync(audioPath)
+  const form = new FormData()
+  form.append(
+    'file',
+    new Blob([new Uint8Array(bytes)], { type: mimeType }),
+    path.basename(audioPath),
+  )
+  form.append('model', 'whisper-large-v3')
+  form.append('response_format', 'verbose_json')
+  form.append('timestamp_granularities[]', 'word')
+  form.append('timestamp_granularities[]', 'segment')
+
+  const response = await fetch(
+    'https://api.groq.com/openai/v1/audio/transcriptions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.GROQ_API_KEY}`,
+      },
+      body: form,
+    },
+  )
+  if (!response.ok) {
     throw new Error(`Groq STT failed: ${await response.text()}`)
   }
+  return parseGroqTranscript(
+    (await response.json()) as {
+      text?: string
+      words?: GroqWord[]
+      segments?: GroqSegment[]
+    },
+    offsetSeconds,
+  )
+}
 
-  const data = (await response.json()) as {
-    text?: string
-    words?: Array<{ word?: string; start?: number; end?: number }>
-  }
+type GroqWord = { word?: string; start?: number; end?: number }
+type GroqSegment = {
+  text?: string
+  start?: number
+  end?: number
+  words?: GroqWord[]
+}
 
-  const words = (data.words ?? [])
+function mapGroqWords(raw: GroqWord[] | undefined, offsetSeconds: number) {
+  return (raw ?? [])
     .filter(
       (w) =>
         typeof w.word === 'string' &&
@@ -125,13 +202,108 @@ async function transcribeWithGroq(wavPath: string): Promise<{
     )
     .map((w) => ({
       word: String(w.word),
-      start: Number(w.start),
-      end: Number(w.end),
+      start: Number(w.start) + offsetSeconds,
+      end: Number(w.end) + offsetSeconds,
     }))
+}
+
+function parseGroqTranscript(
+  data: {
+    text?: string
+    words?: GroqWord[]
+    segments?: GroqSegment[]
+  },
+  offsetSeconds: number,
+) {
+  let words = mapGroqWords(data.words, offsetSeconds)
+
+  if (!words.length) {
+    words = (data.segments ?? []).flatMap((segment) =>
+      mapGroqWords(segment.words, offsetSeconds),
+    )
+  }
+
+  if (!words.length) {
+    words = (data.segments ?? [])
+      .map((segment) => {
+        const text = String(segment.text ?? '').replace(/\s+/g, ' ').trim()
+        const start = Number(segment.start)
+        const end = Number(segment.end)
+        if (!text || !Number.isFinite(start) || !Number.isFinite(end)) {
+          return null
+        }
+        return {
+          word: text,
+          start: start + offsetSeconds,
+          end: end + offsetSeconds,
+        }
+      })
+      .filter((row): row is { word: string; start: number; end: number } =>
+        Boolean(row),
+      )
+  }
+
+  const phrases: CaptionCue[] = (data.segments ?? [])
+    .map((segment) => {
+      const text = String(segment.text ?? '').replace(/\s+/g, ' ').trim()
+      const start = Number(segment.start)
+      const end = Number(segment.end)
+      if (!text || !Number.isFinite(start) || !Number.isFinite(end)) return null
+      return {
+        text,
+        start: start + offsetSeconds,
+        end: end + offsetSeconds,
+      }
+    })
+    .filter((row): row is CaptionCue => Boolean(row))
 
   return {
-    transcript: data.text ?? '',
+    transcript: (data.text ?? words.map((w) => w.word).join(' ')).trim(),
     words,
+    phrases,
+  }
+}
+
+async function transcribeSourceAudio(
+  inputPath: string,
+  durationSeconds: number,
+  tempDir: string,
+): Promise<{
+  transcript: string
+  words: Array<{ word: string; start: number; end: number }>
+  phrases: CaptionCue[]
+}> {
+  const extracted = await extractAudioForStt(
+    inputPath,
+    path.join(tempDir, `audio-${Date.now()}`),
+  )
+
+  try {
+    if (durationSeconds <= GROQ_CHUNK_SECONDS + 30) {
+      return transcribeWithGroq(extracted.path, extracted.mimeType)
+    }
+
+    const transcriptParts: string[] = []
+    const words: Array<{ word: string; start: number; end: number }> = []
+    const phrases: CaptionCue[] = []
+
+    for (let start = 0; start < durationSeconds; start += GROQ_CHUNK_SECONDS) {
+      const chunkDur = Math.min(GROQ_CHUNK_SECONDS, durationSeconds - start)
+      const chunkPath = path.join(tempDir, `chunk-${start}.mp3`)
+      await extractAudioSlice(extracted.path, chunkPath, start, chunkDur)
+      try {
+        const part = await transcribeWithGroq(chunkPath, 'audio/mpeg', start)
+        if (part.transcript.trim()) transcriptParts.push(part.transcript.trim())
+        words.push(...part.words)
+        phrases.push(...part.phrases)
+      } finally {
+        if (fs.existsSync(chunkPath)) fs.unlinkSync(chunkPath)
+      }
+    }
+
+    return { transcript: transcriptParts.join(' '), words, phrases }
+  } finally {
+    if (fs.existsSync(extracted.path)) fs.unlinkSync(extracted.path)
   }
 }
 
@@ -147,7 +319,10 @@ export async function processTalkingHead(input: {
   keepAudio: boolean
   speedRamp?: 'off' | 'light' | 'medium' | 'aggressive'
   captions?: boolean
+  captionOptions?: ProjectOptionsDto
   durationSeconds?: number
+  motion?: ClipMotion
+  aspectRatio?: '9:16' | '1:1' | '16:9'
 }): Promise<TalkingHeadResult> {
   const notes: string[] = ['Talking-head: remove pauses / dead air between speech']
   const hasAudio = await probeHasAudio(input.inputPath)
@@ -164,22 +339,26 @@ export async function processTalkingHead(input: {
 
   let transcript = ''
   let words: TalkingHeadResult['words'] = []
+  let phrases: CaptionCue[] = []
   let provider: TalkingHeadResult['provider'] = 'ffmpeg'
   let silenceRanges: Array<{ start: number; end: number }> = []
   let baseCuts: Array<{ start: number; end: number }> = []
 
   const tempDir = path.join(path.dirname(input.outputPath), '.tmp')
   fs.mkdirSync(tempDir, { recursive: true })
-  const wavPath = path.join(tempDir, `audio-${Date.now()}.wav`)
 
   try {
     if (env.GROQ_API_KEY) {
-      await extractAudioWav(input.inputPath, wavPath)
-      const stt = await transcribeWithGroq(wavPath)
+      const stt = await transcribeSourceAudio(input.inputPath, duration, tempDir)
       transcript = stt.transcript
       words = stt.words
+      phrases = stt.phrases.length ? stt.phrases : wordsToCaptionCues(words)
       provider = 'ffmpeg+groq'
-      notes.push('Transcript + word timings from Groq Whisper')
+      notes.push(
+        duration > GROQ_CHUNK_SECONDS + 30
+          ? 'Transcript + phrase timings from Groq Whisper (chunked)'
+          : 'Transcript + phrase timings from Groq Whisper',
+      )
 
       baseCuts = cutsFromWords(words, duration, input.silenceSensitivity)
       if (baseCuts.length) {
@@ -194,8 +373,6 @@ export async function processTalkingHead(input: {
     notes.push(
       `STT skipped: ${error instanceof Error ? error.message : 'unknown error'}`,
     )
-  } finally {
-    if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath)
   }
 
   if (!baseCuts.length) {
@@ -232,7 +409,14 @@ export async function processTalkingHead(input: {
     outputPath: input.outputPath,
     cuts,
     keepAudio: input.keepAudio,
+    motion: input.motion ?? 'punch',
+    aspectRatio: input.aspectRatio ?? '9:16',
   })
+  if ((input.motion ?? 'punch') !== 'none') {
+    notes.push(
+      `Jump-cut motion: ${input.motion ?? 'punch'} (full-body overall, light punch-in)`,
+    )
+  }
 
   const outputDurationSeconds = totalOutputDuration(cuts)
   notes.push(
@@ -240,19 +424,100 @@ export async function processTalkingHead(input: {
   )
 
   let captionsPath: string | undefined
-  if (input.captions && words.length) {
-    const remapped = remapWordsToOutput(words, cuts)
-    const cues = wordsToCaptionCues(remapped)
+  let captionsBurned = false
+  const wantCaptions = input.captions !== false
+  if (wantCaptions) {
+    const sourceCues = words.length
+      ? wordsToCaptionCues(remapWordsToOutput(words, cuts))
+      : phrases.length
+        ? remapCuesToOutput(phrases, cuts)
+        : []
+    const cues = sourceCues
     if (cues.length) {
       captionsPath = path.join(
         path.dirname(input.outputPath),
-        `${path.basename(input.outputPath, '.mp4')}.captions.srt`,
+        `${path.basename(input.outputPath, '.mp4')}.captions.ass`,
       )
-      writeSrtFile(cues, captionsPath)
+      const captionOptions = input.captionOptions
+      writeAssFile(cues, captionsPath, {
+        fontName:
+          captionOptions?.captionFontFamily === 'impact'
+            ? 'Impact'
+            : captionOptions?.captionFontFamily === 'georgia'
+              ? 'Georgia'
+              : captionOptions?.captionFontFamily === 'verdana'
+                ? 'Verdana'
+                : captionOptions?.captionFontFamily === 'comic-sans'
+                  ? 'Comic Sans MS'
+                  : captionOptions?.captionFontFamily === 'courier'
+                    ? 'Courier New'
+                    : captionOptions?.captionFontFamily === 'segoe'
+                      ? 'Segoe UI'
+                      : 'Arial',
+        fontSize: assFontSizeFromUi(captionOptions?.captionFontSize ?? 22),
+        primaryColour:
+          captionOptions?.captionColor === 'yellow'
+            ? '&H0000FFFF'
+            : captionOptions?.captionColor === 'black'
+              ? '&H00000000'
+              : captionOptions?.captionColor === 'cyan'
+                ? '&H00FFFF00'
+                : '&H00FFFFFF',
+        alignment: captionOptions?.captionPosition === 'top' ? 8 : 2,
+        marginV: captionOptions?.captionPosition === 'top' ? 110 : 120,
+      })
       notes.push(`Timed captions: ${cues.length} cues from speech`)
+
+      const burnedPath = path.join(
+        path.dirname(input.outputPath),
+        `${path.basename(input.outputPath, '.mp4')}.captioned.mp4`,
+      )
+      const burnOptions = input.captionOptions ?? {
+        captions: true,
+        captionPosition: 'bottom' as const,
+        captionFontFamily: 'arial' as const,
+        captionFontSize: 22 as const,
+        captionColor: 'white' as const,
+        aspectRatio: input.aspectRatio ?? '9:16',
+        silenceSensitivity: input.silenceSensitivity,
+        pacing: 'fast' as const,
+        speedRamp: 'off' as const,
+        keyframing: false,
+        keyframePreset: 'speaker-punch-in' as const,
+        keepAudio: true,
+        audioNormalize: false,
+        cropPreset: 'none' as const,
+        colorGrade: 'none' as const,
+        fadeInOut: false,
+        mirrorHorizontal: false,
+        introTitleCard: false,
+      }
+      try {
+        await burnTimedCaptions({
+          inputPath: input.outputPath,
+          outputPath: burnedPath,
+          captionsPath,
+          options: burnOptions,
+        })
+        fs.copyFileSync(burnedPath, input.outputPath)
+        captionsBurned = true
+        notes.push('Captions burned into the cut')
+      } catch (error) {
+        notes.push(
+          `Caption burn failed: ${
+            error instanceof Error ? error.message.slice(0, 140) : 'ffmpeg error'
+          }`,
+        )
+      } finally {
+        try {
+          if (fs.existsSync(burnedPath)) fs.unlinkSync(burnedPath)
+        } catch {
+          /* ignore */
+        }
+      }
+    } else {
+      notes.push('Captions requested but no speech phrases were found')
     }
-  } else if (input.captions && !words.length) {
-    notes.push('Captions requested but no word timings — polish may use title text')
   }
 
   return {
@@ -264,6 +529,7 @@ export async function processTalkingHead(input: {
     silenceRanges,
     cuts,
     captionsPath,
+    captionsBurned,
     segmentSpeedApplied: sped,
     outputPath: input.outputPath,
     outputUrl: input.outputUrl,

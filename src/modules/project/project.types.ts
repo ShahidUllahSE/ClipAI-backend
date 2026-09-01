@@ -3,6 +3,16 @@ import type { EditingModeId, ProjectStatus } from '../../constants/projects'
 export interface ProjectOptionsDto {
   captions: boolean
   captionPosition: 'bottom' | 'top'
+  captionFontFamily:
+    | 'arial'
+    | 'impact'
+    | 'georgia'
+    | 'verdana'
+    | 'comic-sans'
+    | 'courier'
+    | 'segoe'
+  captionFontSize: 18 | 22 | 28 | 36 | 48
+  captionColor: 'white' | 'yellow' | 'black' | 'cyan'
   aspectRatio: '9:16' | '1:1' | '16:9'
   silenceSensitivity: 'light' | 'medium' | 'aggressive'
   pacing: 'normal' | 'fast' | 'very-fast'

@@ -33,6 +33,17 @@ export const SILENCE_LEVELS = ['light', 'medium', 'aggressive'] as const
 export const PACING_LEVELS = ['normal', 'fast', 'very-fast'] as const
 export const SPEED_RAMPS = ['off', 'light', 'medium', 'aggressive'] as const
 export const CAPTION_POSITIONS = ['bottom', 'top'] as const
+export const CAPTION_FONT_FAMILIES = [
+  'arial',
+  'impact',
+  'georgia',
+  'verdana',
+  'comic-sans',
+  'courier',
+  'segoe',
+] as const
+export const CAPTION_FONT_SIZES = [18, 22, 28, 36, 48] as const
+export const CAPTION_COLORS = ['white', 'yellow', 'black', 'cyan'] as const
 export const KEYFRAME_PRESETS = [
   'slow-zoom-in',
   'slow-zoom-out',

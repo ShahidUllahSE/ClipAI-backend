@@ -5,6 +5,7 @@ import { toPublicProject } from '../project/project.mapper'
 import { projectService } from '../project/project.service'
 import { UserModel } from '../user/user.model'
 import { JobModel } from './job.model'
+import { enqueueJob } from './job.queue'
 import { runJobPipeline } from './job.processor'
 
 export const jobService = {
@@ -49,7 +50,7 @@ export const jobService = {
       steps: [{ status: 'Queued', at: new Date(), note: 'Accepted' }],
     })
 
-    void runJobPipeline(job._id.toString(), project._id.toString())
+    enqueueJob(() => runJobPipeline(job._id.toString(), project._id.toString()))
 
     return {
       project: toPublicProject(project),

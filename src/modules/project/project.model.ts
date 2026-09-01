@@ -1,6 +1,9 @@
 import { Schema, model, type Document, type InferSchemaType } from 'mongoose'
 import {
   ASPECT_RATIOS,
+  CAPTION_COLORS,
+  CAPTION_FONT_FAMILIES,
+  CAPTION_FONT_SIZES,
   CAPTION_POSITIONS,
   COLOR_GRADES,
   CROP_PRESETS,
@@ -15,6 +18,17 @@ import {
 const optionsSchema = {
   captions: { type: Boolean, default: true },
   captionPosition: { type: String, enum: CAPTION_POSITIONS, default: 'bottom' },
+  captionFontFamily: {
+    type: String,
+    enum: CAPTION_FONT_FAMILIES,
+    default: 'arial',
+  },
+  captionFontSize: {
+    type: Number,
+    enum: CAPTION_FONT_SIZES,
+    default: 22,
+  },
+  captionColor: { type: String, enum: CAPTION_COLORS, default: 'white' },
   aspectRatio: { type: String, enum: ASPECT_RATIOS, default: '9:16' },
   silenceSensitivity: {
     type: String,

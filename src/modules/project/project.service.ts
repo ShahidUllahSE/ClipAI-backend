@@ -19,6 +19,9 @@ function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
   return {
     captions: raw.captions ?? true,
     captionPosition: raw.captionPosition ?? 'bottom',
+    captionFontFamily: raw.captionFontFamily ?? 'arial',
+    captionFontSize: raw.captionFontSize ?? 22,
+    captionColor: raw.captionColor ?? 'white',
     aspectRatio: raw.aspectRatio ?? '9:16',
     silenceSensitivity: raw.silenceSensitivity ?? 'medium',
     pacing: raw.pacing ?? 'fast',

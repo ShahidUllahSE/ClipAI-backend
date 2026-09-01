@@ -1,6 +1,9 @@
 import { z } from 'zod'
 import {
   ASPECT_RATIOS,
+  CAPTION_COLORS,
+  CAPTION_FONT_FAMILIES,
+  CAPTION_FONT_SIZES,
   CAPTION_POSITIONS,
   COLOR_GRADES,
   CROP_PRESETS,
@@ -14,6 +17,15 @@ import {
 export const projectOptionsSchema = z.object({
   captions: z.boolean(),
   captionPosition: z.enum(CAPTION_POSITIONS),
+  captionFontFamily: z.enum(CAPTION_FONT_FAMILIES).default('arial'),
+  captionFontSize: z
+    .coerce
+    .number()
+    .refine((value) => (CAPTION_FONT_SIZES as readonly number[]).includes(value), {
+      message: 'Invalid caption font size.',
+    })
+    .default(22),
+  captionColor: z.enum(CAPTION_COLORS).default('white'),
   aspectRatio: z.enum(ASPECT_RATIOS),
   silenceSensitivity: z.enum(SILENCE_LEVELS),
   pacing: z.enum(PACING_LEVELS),
@@ -27,6 +39,7 @@ export const projectOptionsSchema = z.object({
   fadeInOut: z.boolean().default(true),
   mirrorHorizontal: z.boolean().default(false),
   introTitleCard: z.boolean().default(true),
+  timelineJson: z.unknown().optional().nullable(),
 })
 
 export const createProjectSchema = z

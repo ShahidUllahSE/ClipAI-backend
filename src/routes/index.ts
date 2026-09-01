@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { adminRoutes } from '../modules/admin'
+import { captionRoutes } from '../modules/caption'
 import { projectRoutes } from '../modules/project'
 import { uploadRoutes } from '../modules/upload'
 import { userRoutes } from '../modules/user'
@@ -14,3 +15,4 @@ apiRouter.use('/auth', userRoutes)
 apiRouter.use('/admin', adminRoutes)
 apiRouter.use('/uploads', uploadRoutes)
 apiRouter.use('/projects', projectRoutes)
+apiRouter.use('/captions', captionRoutes)

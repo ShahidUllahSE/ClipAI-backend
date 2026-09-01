@@ -1,12 +1,73 @@
 import { execFile } from 'child_process'
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import { promisify } from 'util'
 import { env } from '../config'
 import type { ProjectOptionsDto } from '../modules/project/project.types'
 import { FFMPEG, probeDuration, probeHasAudio } from './ffmpeg'
+import {
+  assFontSizeFromUi,
+  parseSrtFile,
+  writeAssFile,
+} from './timed-edit'
 
 const execFileAsync = promisify(execFile)
+
+function captionFontName(family: ProjectOptionsDto['captionFontFamily']) {
+  switch (family) {
+    case 'impact':
+      return 'Impact'
+    case 'georgia':
+      return 'Georgia'
+    case 'verdana':
+      return 'Verdana'
+    case 'comic-sans':
+      return 'Comic Sans MS'
+    case 'courier':
+      return 'Courier New'
+    case 'segoe':
+      return 'Segoe UI'
+    default:
+      return 'Arial'
+  }
+}
+
+function captionAssColor(color: ProjectOptionsDto['captionColor']) {
+  switch (color) {
+    case 'yellow':
+      return '&H0000FFFF'
+    case 'black':
+      return '&H00000000'
+    case 'cyan':
+      return '&H00FFFF00'
+    default:
+      return '&H00FFFFFF'
+  }
+}
+
+function captionCssColor(color: ProjectOptionsDto['captionColor']) {
+  switch (color) {
+    case 'yellow':
+      return '#facc15'
+    case 'black':
+      return 'black'
+    case 'cyan':
+      return '#22d3ee'
+    default:
+      return 'white'
+  }
+}
+
+function captionStyle(options: ProjectOptionsDto) {
+  return {
+    fontName: captionFontName(options.captionFontFamily),
+    fontSize: options.captionFontSize ?? 18,
+    assColor: captionAssColor(options.captionColor),
+    cssColor: captionCssColor(options.captionColor),
+    outline: options.captionColor === 'black' ? '&H00FFFFFF' : '&H80000000',
+  }
+}
 
 function escapeDrawText(text: string) {
   return text
@@ -27,6 +88,30 @@ function targetSize(aspect: ProjectOptionsDto['aspectRatio']) {
   if (aspect === '1:1') return { w: 1080, h: 1080 }
   if (aspect === '16:9') return { w: 1920, h: 1080 }
   return { w: 1080, h: 1920 }
+}
+
+function assStyleFromOptions(options: ProjectOptionsDto) {
+  return {
+    fontName: captionFontName(options.captionFontFamily),
+    fontSize: assFontSizeFromUi(options.captionFontSize ?? 22),
+    primaryColour: captionAssColor(options.captionColor),
+    alignment: options.captionPosition === 'top' ? 8 : 2,
+    marginV: options.captionPosition === 'top' ? 110 : 120,
+  }
+}
+
+function materializeAssCaptions(
+  captionsPath: string,
+  options: ProjectOptionsDto,
+  tag: string,
+) {
+  const assPath = path.join(os.tmpdir(), `clipai-${tag}-${Date.now()}.ass`)
+  if (captionsPath.toLowerCase().endsWith('.ass')) {
+    fs.copyFileSync(captionsPath, assPath)
+    return assPath
+  }
+  writeAssFile(parseSrtFile(captionsPath), assPath, assStyleFromOptions(options))
+  return assPath
 }
 
 function speedFactor(level: ProjectOptionsDto['speedRamp']) {
@@ -155,16 +240,13 @@ export async function applyExportPolish(input: {
     Boolean(options.captions && input.captionsPath) &&
     fs.existsSync(input.captionsPath ?? '')
 
+  let timedAssPath: string | undefined
   if (hasTimedCaptions && input.captionsPath) {
-    const escaped = input.captionsPath
-      .replace(/\\/g, '/')
-      .replace(/:/g, '\\:')
-      .replace(/'/g, "\\'")
-    const alignment = options.captionPosition === 'top' ? 6 : 2
-    vf.push(
-      `subtitles='${escaped}':force_style='Fontsize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BorderStyle=3,Outline=2,Shadow=0,Alignment=${alignment},MarginV=48'`,
+    timedAssPath = materializeAssCaptions(input.captionsPath, options, 'polish')
+    vf.push(subtitlesFilter(timedAssPath))
+    notes.push(
+      `Timed speech captions burned in (${options.captionPosition}, ${options.captionFontFamily} ${options.captionFontSize})`,
     )
-    notes.push(`Timed speech captions burned in (${options.captionPosition})`)
   } else {
     const overlayLines: string[] = []
     if (options.introTitleCard && input.title?.trim()) {
@@ -186,6 +268,7 @@ export async function applyExportPolish(input: {
       }
     }
 
+    const style = captionStyle(options)
     for (let i = 0; i < overlayLines.length; i++) {
       const text = escapeDrawText(overlayLines[i])
       const isTitle = Boolean(options.introTitleCard && i === 0)
@@ -193,7 +276,7 @@ export async function applyExportPolish(input: {
       const y = `h*${(yBase + i * 0.06).toFixed(2)}`
       const enable = isTitle ? `:enable='lt(t,2.2)'` : ''
       vf.push(
-        `drawtext=text='${text}':fontsize=${isTitle ? 34 : 26}:fontcolor=white:borderw=3:bordercolor=black@0.65:x=(w-text_w)/2:y=${y}${enable}`,
+        `drawtext=text='${text}':font='${style.fontName}':fontsize=${isTitle ? Math.max(34, style.fontSize + 8) : style.fontSize}:fontcolor=${style.cssColor}:borderw=3:bordercolor=black@0.65:x=(w-text_w)/2:y=${y}${enable}`,
       )
     }
   }
@@ -274,22 +357,32 @@ export async function applyExportPolish(input: {
   }
 
   try {
-    await execFileAsync(FFMPEG, buildArgs(vf, af), {
-      maxBuffer: 30 * 1024 * 1024,
-    })
-  } catch (error) {
-    notes.push(
-      `Polish retry (simplified): ${
-        error instanceof Error ? error.message.slice(0, 120) : 'ffmpeg error'
-      }`,
-    )
-    const simpleVf = vf.filter(
-      (f) => !f.startsWith('drawtext=') && !f.startsWith('subtitles='),
-    )
-    const simpleAf = af.filter((f) => !f.startsWith('loudnorm'))
-    await execFileAsync(FFMPEG, buildArgs(simpleVf, simpleAf), {
-      maxBuffer: 30 * 1024 * 1024,
-    })
+    try {
+      await execFileAsync(FFMPEG, buildArgs(vf, af), {
+        maxBuffer: 30 * 1024 * 1024,
+      })
+    } catch (error) {
+      notes.push(
+        `Polish retry (simplified): ${
+          error instanceof Error ? error.message.slice(0, 120) : 'ffmpeg error'
+        }`,
+      )
+      const simpleVf = vf.filter(
+        (f) => !f.startsWith('drawtext=') && !f.startsWith('subtitles='),
+      )
+      const simpleAf = af.filter((f) => !f.startsWith('loudnorm'))
+      await execFileAsync(FFMPEG, buildArgs(simpleVf, simpleAf), {
+        maxBuffer: 30 * 1024 * 1024,
+      })
+    }
+  } finally {
+    if (timedAssPath) {
+      try {
+        fs.unlinkSync(timedAssPath)
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   const outDur = await probeDuration(input.outputPath)
@@ -302,4 +395,58 @@ export function makeTempSibling(filePath: string, tag: string) {
   const dir = path.dirname(filePath)
   const base = path.basename(filePath, path.extname(filePath))
   return path.join(dir, `${base}.${tag}.mp4`)
+}
+
+function subtitlesFilter(captionsPath: string) {
+  const escaped = captionsPath
+    .replace(/\\/g, '/')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "\\'")
+  return `subtitles='${escaped}'`
+}
+
+/** Burn timed captions onto a cut when full studio polish is skipped. */
+export async function burnTimedCaptions(input: {
+  inputPath: string
+  outputPath: string
+  captionsPath: string
+  options: ProjectOptionsDto
+}): Promise<void> {
+  const tmpAss = materializeAssCaptions(input.captionsPath, input.options, 'cap')
+  try {
+    await execFileAsync(
+      FFMPEG,
+      [
+        '-y',
+        '-hide_banner',
+        '-nostats',
+        '-i',
+        input.inputPath,
+        '-vf',
+        subtitlesFilter(tmpAss),
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        env.fastExport ? '28' : '26',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'copy',
+        '-movflags',
+        '+faststart',
+        '-threads',
+        '0',
+        input.outputPath,
+      ],
+      { maxBuffer: 30 * 1024 * 1024, timeout: 25 * 60 * 1000 },
+    )
+  } finally {
+    try {
+      fs.unlinkSync(tmpAss)
+    } catch {
+      /* ignore */
+    }
+  }
 }
