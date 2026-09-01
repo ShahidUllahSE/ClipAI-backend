@@ -484,7 +484,7 @@ export async function processTalkingHead(input: {
                 ? '&H00FFFF00'
                 : '&H00FFFFFF',
         alignment: captionOptions?.captionPosition === 'top' ? 8 : 2,
-        marginV: captionOptions?.captionPosition === 'top' ? 110 : 120,
+        marginV: captionOptions?.captionPosition === 'top' ? 90 : 80,
       })
       notes.push(`Timed captions: ${cues.length} cues from speech`)
 

@@ -96,7 +96,7 @@ function assStyleFromOptions(options: ProjectOptionsDto) {
     fontSize: assFontSizeFromUi(options.captionFontSize ?? 22),
     primaryColour: captionAssColor(options.captionColor),
     alignment: options.captionPosition === 'top' ? 8 : 2,
-    marginV: options.captionPosition === 'top' ? 110 : 120,
+    marginV: options.captionPosition === 'top' ? 90 : 80,
   }
 }
 

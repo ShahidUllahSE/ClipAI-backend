@@ -134,6 +134,12 @@ export function wordsToCaptionCues(
   return cues.filter((c) => c.text.length > 0)
 }
 
+function spokenWordEnd(word: TimedWord) {
+  const letters = word.word.replace(/[^A-Za-z]/g, '').length
+  const minDur = Math.min(0.85, Math.max(0.14, letters * 0.07))
+  return Math.max(word.end, word.start + minDur)
+}
+
 /** Group words into spoken thoughts (sentence / pause), not 5-word chunks. */
 export function wordsToSentenceCues(words: TimedWord[]): CaptionCue[] {
   if (!words.length) return []
@@ -142,9 +148,10 @@ export function wordsToSentenceCues(words: TimedWord[]): CaptionCue[] {
 
   const flush = () => {
     if (!bucket.length) return
+    const last = bucket[bucket.length - 1]
     cues.push({
       start: bucket[0].start,
-      end: Math.max(bucket[bucket.length - 1].end, bucket[0].start + 0.35),
+      end: Math.max(spokenWordEnd(last), bucket[0].start + 0.35),
       text: bucket
         .map((w) => w.word.trim())
         .filter(Boolean)
@@ -158,14 +165,13 @@ export function wordsToSentenceCues(words: TimedWord[]): CaptionCue[] {
   for (const w of words) {
     if (bucket.length) {
       const gap = w.start - bucket[bucket.length - 1].end
-      const span = w.end - bucket[0].start
-      if (gap >= 0.3 || bucket.length >= 10 || span >= 3.2) flush()
+      if (gap >= 0.28) flush()
     }
     bucket.push(w)
-    if (/[.?!]["')\]]*$/.test(w.word.trim()) && bucket.length >= 2) flush()
+    if (endsSpokenSentence(w.word) && bucket.length >= 2) flush()
   }
   flush()
-  return cues.filter((c) => c.text.length > 0)
+  return splitCuesOnSentences(cues.filter((c) => c.text.length > 0))
 }
 
 export function mergeSpokenPhrases(phrases: CaptionCue[]): CaptionCue[] {
@@ -175,7 +181,11 @@ export function mergeSpokenPhrases(phrases: CaptionCue[]): CaptionCue[] {
     const prev = merged[merged.length - 1]
     const gap = prev ? phrase.start - prev.end : 99
     const dur = phrase.end - phrase.start
-    if (prev && (gap < 0.14 || (dur < 0.4 && gap < 0.35))) {
+    if (
+      prev &&
+      !endsSpokenSentence(prev.text) &&
+      (gap < 0.14 || (dur < 0.4 && gap < 0.35))
+    ) {
       prev.end = Math.max(prev.end, phrase.end)
       prev.text = `${prev.text} ${phrase.text}`.replace(/\s+/g, ' ').trim()
     } else {
@@ -192,13 +202,19 @@ export function cutsFromPhrases(
   phrases: CaptionCue[],
   durationSeconds: number,
 ): Array<{ start: number; end: number }> {
-  return mergeSpokenPhrases(phrases).map((phrase) => ({
-    start: Math.max(0, phrase.start),
-    end: Math.min(
-      durationSeconds,
-      Math.max(phrase.start + 0.28, phrase.end + 0.04),
-    ),
-  }))
+  const merged = mergeSpokenPhrases(phrases)
+  return merged.map((phrase, i) => {
+    const next = merged[i + 1]
+    const start = Math.max(0, phrase.start - 0.04)
+    let end = phrase.end + 0.2
+    if (next && next.start > phrase.end) {
+      end = Math.min(end, next.start - 0.03)
+    }
+    return {
+      start,
+      end: Math.min(durationSeconds, Math.max(start + 0.3, end)),
+    }
+  })
 }
 
 /** One caption per keep-cut, using the spoken thought that lives in that cut. */
@@ -260,8 +276,9 @@ function srtStamp(seconds: number) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`
 }
 
-function wrapCaptionLine(text: string, maxChars = 42) {
+function wrapCaptionLine(text: string, maxChars = 26) {
   const words = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean)
+  if (!words.length) return ''
   const lines: string[] = []
   let current = ''
   for (const word of words) {
@@ -274,24 +291,64 @@ function wrapCaptionLine(text: string, maxChars = 42) {
     }
   }
   if (current) lines.push(current)
-  return lines.slice(0, 2).join('\\N')
+  if (lines.length <= 2) return lines.join('\\N')
+  return `${lines[0]}\\N${lines.slice(1).join(' ')}`
+}
+
+function maxCaptionChars(fontSize: number, playResX = 1080, margin = 72) {
+  const usable = Math.max(360, playResX - margin * 2)
+  return Math.max(18, Math.min(28, Math.floor(usable / (fontSize * 0.58))))
+}
+
+function endsSpokenSentence(text: string) {
+  return /[.?!]["')\]]*$/.test(text.trim())
+}
+
+function splitCuesOnSentences(cues: CaptionCue[]): CaptionCue[] {
+  const out: CaptionCue[] = []
+  for (const cue of cues) {
+    const parts = cue.text
+      .split(/(?<=[.?!])["')\]]*\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+    if (parts.length <= 1) {
+      out.push(cue)
+      continue
+    }
+    const totalChars = parts.reduce((sum, part) => sum + part.length, 0) || 1
+    const span = Math.max(0.2, cue.end - cue.start)
+    let t = cue.start
+    for (let i = 0; i < parts.length; i++) {
+      const dur =
+        i === parts.length - 1
+          ? Math.max(0.2, cue.end - t)
+          : Math.max(0.2, span * (parts[i].length / totalChars))
+      out.push({
+        text: parts[i],
+        start: t,
+        end: Math.min(cue.end, t + dur),
+      })
+      t += dur
+    }
+  }
+  return out
 }
 
 /** Map editor sizes onto a 1080×1920 canvas at movie-subtitle scale. */
 export function assFontSizeFromUi(size?: number) {
   switch (size) {
     case 18:
-      return 68
+      return 50
     case 22:
-      return 80
+      return 58
     case 28:
-      return 92
+      return 68
     case 36:
-      return 108
+      return 78
     case 48:
-      return 124
+      return 90
     default:
-      return 80
+      return 58
   }
 }
 
@@ -362,14 +419,15 @@ export function writeAssFile(
   },
 ) {
   const fontName = style?.fontName ?? 'Arial'
-  const fontSize = style?.fontSize ?? 80
+  const fontSize = style?.fontSize ?? 58
   const primary = style?.primaryColour ?? '&H00FFFFFF'
   const alignment = style?.alignment ?? 2
-  const marginV = style?.marginV ?? 120
+  const marginV = style?.marginV ?? 80
+  const marginH = 72
   const events = cues
     .filter((c) => c.text.trim())
     .map((c) => {
-      const text = wrapCaptionLine(c.text)
+      const text = wrapCaptionLine(c.text, maxCaptionChars(fontSize, 1080, marginH))
       return `Dialogue: 0,${assStamp(c.start)},${assStamp(c.end)},Default,,0,0,0,,${text}`
     })
     .join('\n')
@@ -378,12 +436,12 @@ export function writeAssFile(
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
-WrapStyle: 0
+WrapStyle: 1
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,${fontName},${fontSize},${primary},&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,4,2,${alignment},80,80,${marginV},1
+Style: Default,${fontName},${fontSize},${primary},&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,${alignment},${marginH},${marginH},${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
