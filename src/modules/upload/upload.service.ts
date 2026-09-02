@@ -11,6 +11,7 @@ import { UploadModel } from './upload.model'
 import { UploadSessionModel } from './upload-session.model'
 
 const CHUNK_SIZE = 20 * 1024 * 1024
+const CHUNK_REQUEST_LIMIT = CHUNK_SIZE + 1024 * 1024
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
 
 function ensureUploadDir() {
@@ -64,7 +65,9 @@ const chunkStorage = multer.diskStorage({
 
 export const chunkUploadMiddleware = multer({
   storage: chunkStorage,
-  limits: { fileSize: CHUNK_SIZE },
+  // Multer/Busboy treats a file at the exact limit as truncated. Allow a small
+  // transport margin; storeChunk still requires the exact expected byte count.
+  limits: { fileSize: CHUNK_REQUEST_LIMIT },
 }).single('chunk')
 
 function expiresAt() {
