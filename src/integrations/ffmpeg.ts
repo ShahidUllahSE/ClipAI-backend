@@ -538,8 +538,8 @@ function motionScaleCrop(
 
   const apply = (zoom: number, fx: number, fy: number) => {
     const crop = `crop=${w}:${h}:${cropAround(fx, fy)}`
-    if (zoom <= 1.01) return `${cover},${crop}`
-    return `${cover},scale=iw*${zoom}:ih*${zoom}:flags=fast_bilinear,${crop}`
+    if (zoom <= 1.01) return `${cover},${crop},setsar=1`
+    return `${cover},scale=iw*${zoom}:ih*${zoom}:flags=fast_bilinear,${crop},setsar=1`
   }
 
   if (motion === 'none') return apply(1, 0.5, 0.5)
