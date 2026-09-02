@@ -134,6 +134,50 @@ export function wordsToCaptionCues(
   return cues.filter((c) => c.text.length > 0)
 }
 
+/**
+ * Split coarse segment-level transcription cues into readable captions.
+ * Timing is distributed proportionally because no word timestamps are
+ * available in this fallback path.
+ */
+export function splitLongCaptionCues(
+  cues: CaptionCue[],
+  maxWords = 5,
+  maxSpan = 2.4,
+): CaptionCue[] {
+  const out: CaptionCue[] = []
+
+  for (const cue of cues) {
+    const words = cue.text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean)
+    if (!words.length) continue
+
+    const start = Math.max(0, cue.start)
+    const end = Math.max(start + 0.2, cue.end)
+    const span = end - start
+    const partCount = Math.min(
+      words.length,
+      Math.max(
+        1,
+        Math.ceil(words.length / Math.max(1, maxWords)),
+        Math.ceil(span / Math.max(0.4, maxSpan)),
+      ),
+    )
+
+    for (let part = 0; part < partCount; part++) {
+      const from = Math.floor((part * words.length) / partCount)
+      const to = Math.floor(((part + 1) * words.length) / partCount)
+      const partStart = start + span * (from / words.length)
+      const partEnd = start + span * (to / words.length)
+      out.push({
+        text: words.slice(from, to).join(' '),
+        start: Number(partStart.toFixed(3)),
+        end: Number(Math.max(partStart + 0.2, partEnd).toFixed(3)),
+      })
+    }
+  }
+
+  return out
+}
+
 function spokenWordEnd(word: TimedWord) {
   const letters = word.word.replace(/[^A-Za-z]/g, '').length
   const minDur = Math.min(0.85, Math.max(0.14, letters * 0.07))

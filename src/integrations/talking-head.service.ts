@@ -18,8 +18,9 @@ import {
   assignSegmentSpeeds,
   cutsFromPhrases,
   mergeSpokenPhrases,
-  alignCaptionsToCuts,
+  remapCuesToOutput,
   remapWordsToOutput,
+  splitLongCaptionCues,
   totalOutputDuration,
   wordsToCaptionCues,
   wordsToSentenceCues,
@@ -226,26 +227,6 @@ function parseGroqTranscript(
     )
   }
 
-  if (!words.length) {
-    words = (data.segments ?? [])
-      .map((segment) => {
-        const text = String(segment.text ?? '').replace(/\s+/g, ' ').trim()
-        const start = Number(segment.start)
-        const end = Number(segment.end)
-        if (!text || !Number.isFinite(start) || !Number.isFinite(end)) {
-          return null
-        }
-        return {
-          word: text,
-          start: start + offsetSeconds,
-          end: end + offsetSeconds,
-        }
-      })
-      .filter((row): row is { word: string; start: number; end: number } =>
-        Boolean(row),
-      )
-  }
-
   const phrases: CaptionCue[] = (data.segments ?? [])
     .map((segment) => {
       const text = String(segment.text ?? '').replace(/\s+/g, ' ').trim()
@@ -447,12 +428,9 @@ export async function processTalkingHead(input: {
   let captionsBurned = false
   const wantCaptions = input.captions !== false
   if (wantCaptions) {
-    const sourceCues = phrases.length
-      ? alignCaptionsToCuts(phrases, cuts)
-      : words.length
-        ? wordsToCaptionCues(remapWordsToOutput(words, cuts))
-        : []
-    const cues = sourceCues
+    const cues = words.length
+      ? wordsToCaptionCues(remapWordsToOutput(words, cuts))
+      : remapCuesToOutput(splitLongCaptionCues(phrases), cuts)
     if (cues.length) {
       captionsPath = path.join(
         path.dirname(input.outputPath),
