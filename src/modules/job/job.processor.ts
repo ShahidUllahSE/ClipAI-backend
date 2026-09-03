@@ -433,6 +433,45 @@ export async function runJobPipeline(jobId: string, projectId: string) {
           polishNotes = ['Talking-head cut with burned captions']
           polishDuration = result.outputDurationSeconds
           exportCaptionsPath = result.captionsPath
+        } else if (options.captions && !result.captionsPath) {
+          const captionsPath = await prepareExportCaptionsSrt({
+            enabled: true,
+            videoPath: cutPath,
+            srtPath: path.join(
+              path.dirname(outputPath),
+              `${projectId}.captions.srt`,
+            ),
+          })
+          if (captionsPath) {
+            try {
+              await burnTimedCaptions({
+                inputPath: cutPath,
+                outputPath,
+                captionsPath,
+                options,
+              })
+              polishNotes = [
+                'Talking-head fallback kept the punch cuts and burned captions',
+              ]
+              exportCaptionsPath = captionsPath
+            } catch (error) {
+              fs.copyFileSync(cutPath, outputPath)
+              polishNotes = [
+                `Caption burn skipped: ${
+                  error instanceof Error
+                    ? error.message.slice(0, 120)
+                    : 'ffmpeg error'
+                }`,
+              ]
+              exportCaptionsPath = captionsPath
+            }
+          } else {
+            fs.copyFileSync(cutPath, outputPath)
+            polishNotes = [
+              'Talking-head fallback kept the punch cuts; captions were unavailable',
+            ]
+          }
+          polishDuration = result.outputDurationSeconds
         } else {
           const finalized = await finalizeExport({
             projectId,

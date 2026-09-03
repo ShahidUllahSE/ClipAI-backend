@@ -92,6 +92,32 @@ function totalKeepSeconds(cuts: Array<{ start: number; end: number }>) {
   return cuts.reduce((sum, c) => sum + Math.max(0, c.end - c.start), 0)
 }
 
+/**
+ * Without speech timestamps, preserve spoken-thought pacing by removing only
+ * clearly long pauses. Short quiet gaps often occur inside a sentence and
+ * produced the overly aggressive fallback edit.
+ */
+export function fallbackCutsFromSilence(
+  silenceRanges: Array<{ start: number; end: number }>,
+  durationSeconds: number,
+) {
+  const merged: Array<{ start: number; end: number }> = []
+  for (const range of [...silenceRanges].sort((a, b) => a.start - b.start)) {
+    const previous = merged[merged.length - 1]
+    if (previous && range.start - previous.end <= 0.2) {
+      previous.end = Math.max(previous.end, range.end)
+    } else {
+      merged.push({ ...range })
+    }
+  }
+
+  const longPauses = merged.filter((range) => range.end - range.start >= 3)
+  return silenceToKeepCuts(longPauses, durationSeconds, 0.3).map((cut) => ({
+    start: Math.max(0, cut.start - 0.12),
+    end: Math.min(durationSeconds, cut.end + 0.24),
+  }))
+}
+
 const GROQ_CHUNK_SECONDS = 8 * 60
 
 async function transcribeWithGroq(
@@ -381,8 +407,10 @@ export async function processTalkingHead(input: {
       input.silenceSensitivity === 'light' ? 'medium' : input.silenceSensitivity
     silenceRanges = await detectSilenceRanges(input.inputPath, level)
     notes.push(`FFmpeg silence ranges: ${silenceRanges.length}`)
-    baseCuts = silenceToKeepCuts(silenceRanges, duration, 0.15)
-    notes.push(`Keep-segments from silence: ${baseCuts.length}`)
+    baseCuts = fallbackCutsFromSilence(silenceRanges, duration)
+    notes.push(
+      `Fallback spoken-thought cuts (pauses ≥3s): ${baseCuts.length} keep-segments`,
+    )
   }
 
   let keepSeconds = totalKeepSeconds(baseCuts)
@@ -399,7 +427,9 @@ export async function processTalkingHead(input: {
   }
 
   const speedLevel = input.speedRamp ?? 'off'
-  const cuts = assignSegmentSpeeds(baseCuts, speedLevel, { words })
+  const cuts = words.length
+    ? assignSegmentSpeeds(baseCuts, speedLevel, { words })
+    : baseCuts.map((cut) => ({ ...cut, speed: 1 }))
   const sped = cuts.some((c) => c.speed !== 1)
   if (sped) {
     notes.push(`Segment speed ramp: ${speedLevel} (important speech @1×)`)
