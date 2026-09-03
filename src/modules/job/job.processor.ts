@@ -367,8 +367,10 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       )
 
       const upload = await UploadModel.findById(project.uploadId)
-      if (!upload?.storagePath) {
-        throw new Error('Source upload file not found on disk.')
+      if (!upload?.storagePath || !fs.existsSync(upload.storagePath)) {
+        throw new Error(
+          'Source video is not on this server. Upload the file again from this site.',
+        )
       }
 
       const options = normalizeOptions(
@@ -589,8 +591,10 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       )
 
       const upload = await UploadModel.findById(project.uploadId)
-      if (!upload?.storagePath) {
-        throw new Error('Source upload file not found on disk.')
+      if (!upload?.storagePath || !fs.existsSync(upload.storagePath)) {
+        throw new Error(
+          'Source video is not on this server. Upload the file again from this site.',
+        )
       }
 
       const options = normalizeOptions(

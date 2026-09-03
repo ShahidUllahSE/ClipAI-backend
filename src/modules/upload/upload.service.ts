@@ -90,6 +90,15 @@ function removeQuiet(target: string) {
   }
 }
 
+function localFileExists(filePath?: string | null) {
+  if (!filePath) return false
+  try {
+    return fs.existsSync(filePath)
+  } catch {
+    return false
+  }
+}
+
 function cleanupStaleChunkFiles() {
   const root = ensureChunkRoot()
   const cutoff = Date.now() - SESSION_TTL_MS
@@ -236,7 +245,7 @@ export const uploadService = {
         _id: completed.uploadId,
         userId,
       })
-      if (upload) {
+      if (upload && localFileExists(upload.storagePath)) {
         return {
           session: publicSession(completed),
           upload: publicUpload(upload),
@@ -255,7 +264,12 @@ export const uploadService = {
         existing.originalFilename === input.filename &&
         existing.mimeType === input.mimeType &&
         existing.totalSize === input.totalSize
-      if (metadataMatches) {
+      const chunksOnThisMachine =
+        existing.uploadedChunks.length === 0 ||
+        existing.uploadedChunks.every((index) =>
+          localFileExists(chunkPath(existing._id.toString(), index)),
+        )
+      if (metadataMatches && chunksOnThisMachine) {
         existing.expiresAt = expiresAt()
         await existing.save()
         return { session: publicSession(existing) }
