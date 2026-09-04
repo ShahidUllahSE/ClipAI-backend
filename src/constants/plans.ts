@@ -2,9 +2,9 @@ export const PLAN_IDS = ['basic', 'standard', 'pro', 'unlimited'] as const
 export type PlanId = (typeof PLAN_IDS)[number]
 
 export const PLAN_EDIT_QUOTA: Record<PlanId, number> = {
-  basic: 50,
-  standard: 100,
-  pro: 200,
+  basic: 80,
+  standard: 200,
+  pro: 400,
   unlimited: 9999,
 }
 
