@@ -50,6 +50,8 @@ export interface PublicProject {
   createdAt: string
   updatedAt: string
   errorMessage?: string
+  progressPercent?: number
+  progressNote?: string
   previewUrl?: string
   outputUrl?: string
   analysis?: Record<string, unknown> | null

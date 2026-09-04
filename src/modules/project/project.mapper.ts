@@ -17,6 +17,8 @@ interface ProjectLike {
   createdAt: Date
   updatedAt: Date
   errorMessage?: string
+  progressPercent?: number
+  progressNote?: string
   sourceUrl?: string
   outputUrl?: string
   analysis?: Record<string, unknown> | null
@@ -68,6 +70,13 @@ export function toPublicProject(project: ProjectLike): PublicProject {
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
     errorMessage: project.errorMessage || undefined,
+    progressPercent:
+      typeof project.progressPercent === 'number'
+        ? Math.min(100, Math.max(0, Math.round(project.progressPercent)))
+        : project.status === 'Completed'
+          ? 100
+          : 0,
+    progressNote: project.progressNote || undefined,
     previewUrl,
     outputUrl: project.outputUrl || undefined,
     analysis: project.analysis ?? undefined,

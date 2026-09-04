@@ -1,4 +1,4 @@
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { promisify } from 'util'
@@ -96,6 +96,56 @@ async function runFfmpeg(args: string[], timeoutMs = 25 * 60 * 1000) {
   await execFileAsync(FFMPEG, args, {
     maxBuffer: 32 * 1024 * 1024,
     timeout: timeoutMs,
+  })
+}
+
+function runFfmpegProgress(
+  args: string[],
+  durationSeconds: number,
+  onProgress?: (ratio: number) => void,
+  timeoutMs = 25 * 60 * 1000,
+): Promise<void> {
+  if (!onProgress || durationSeconds <= 0) {
+    return runFfmpeg(args, timeoutMs)
+  }
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(FFMPEG, ['-progress', 'pipe:1', ...args], {
+      windowsHide: true,
+    })
+    let last = 0
+    let stderr = ''
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL')
+      reject(new Error('ffmpeg timed out'))
+    }, timeoutMs)
+
+    proc.stdout.setEncoding('utf8')
+    proc.stdout.on('data', (chunk: string) => {
+      const match = /out_time_ms=(\d+)/.exec(chunk)
+      if (!match) return
+      const ratio = Math.min(1, Math.max(0, Number(match[1]) / 1_000_000 / durationSeconds))
+      if (ratio - last >= 0.01) {
+        last = ratio
+        onProgress(ratio)
+      }
+    })
+    proc.stderr.on('data', (chunk) => {
+      stderr += String(chunk)
+    })
+    proc.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) {
+        onProgress(1)
+        resolve()
+        return
+      }
+      reject(new Error(stderr.slice(-400) || `ffmpeg exited ${code}`))
+    })
   })
 }
 
@@ -696,15 +746,19 @@ async function renderSeekedBatch(input: {
   focuses: SubjectFocus[]
   shots: Array<'wide' | 'close'>
   portrait: boolean
+  onProgress?: (ratio: number) => void
 }) {
   const args = ['-y', '-hide_banner', '-nostats']
-  for (const cut of input.cuts) {
+  const prerolls = input.cuts.map((cut) => Math.min(cut.start, 1.5))
+  for (let i = 0; i < input.cuts.length; i++) {
+    const cut = input.cuts[i]
+    const preroll = prerolls[i]
+    const cutDur = Math.max(0.05, cut.end - cut.start)
     args.push(
-      '-noaccurate_seek',
       '-ss',
-      cut.start.toFixed(3),
+      (cut.start - preroll).toFixed(3),
       '-t',
-      Math.max(0.05, cut.end - cut.start).toFixed(3),
+      (preroll + cutDur + 0.2).toFixed(3),
       '-i',
       input.inputPath,
     )
@@ -716,19 +770,22 @@ async function renderSeekedBatch(input: {
 
   input.cuts.forEach((cut, i) => {
     const spd = cut.speed
-    const dur = Math.max(0.2, (cut.end - cut.start) / spd)
+    const cutDur = Math.max(0.05, cut.end - cut.start)
+    const playDur = Math.max(0.2, cutDur / spd)
+    const preroll = prerolls[i].toFixed(3)
+    const trimDur = cutDur.toFixed(3)
     const globalIndex = input.indexOffset + i
     const focus = input.focuses[globalIndex] ?? { x: 0.5, y: 0.45 }
     const shot = input.shots[globalIndex] ?? (globalIndex % 2 === 0 ? 'wide' : 'close')
     const pts = spd === 1 ? 'setpts=PTS-STARTPTS' : `setpts=(PTS-STARTPTS)/${spd}`
     filters.push(
-      `[${i}:v]${pts},${fpsPrefix}${motionScaleCrop(globalIndex, dur, input.motion, input.w, input.h, focus, shot, input.portrait)}[v${i}]`,
+      `[${i}:v]trim=start=${preroll}:duration=${trimDur},${pts},${fpsPrefix}${motionScaleCrop(globalIndex, playDur, input.motion, input.w, input.h, focus, shot, input.portrait)}[v${i}]`,
     )
     if (input.useAudio) {
       const audio =
         spd === 1
-          ? `[${i}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1[a${i}]`
-          : `[${i}:a]asetpts=PTS-STARTPTS,atempo=${spd.toFixed(3)},aresample=44100:async=1[a${i}]`
+          ? `[${i}:a]atrim=start=${preroll}:duration=${trimDur},asetpts=PTS-STARTPTS,aresample=44100:async=1[a${i}]`
+          : `[${i}:a]atrim=start=${preroll}:duration=${trimDur},asetpts=PTS-STARTPTS,atempo=${spd.toFixed(3)},aresample=44100:async=1[a${i}]`
       filters.push(audio)
       concatInputs.push(`[v${i}][a${i}]`)
     } else {
@@ -763,7 +820,11 @@ async function renderSeekedBatch(input: {
     input.outputPath,
   )
 
-  await runFfmpeg(args)
+  const playSeconds = input.cuts.reduce(
+    (sum, cut) => sum + Math.max(0.05, cut.end - cut.start) / cut.speed,
+    0,
+  )
+  await runFfmpegProgress(args, playSeconds, input.onProgress)
 }
 
 /**
@@ -778,6 +839,7 @@ export async function renderJumpCutVideo(input: {
   keepAudio: boolean
   motion?: ClipMotion
   aspectRatio?: '9:16' | '1:1' | '16:9'
+  onProgress?: (ratio: number) => void
 }): Promise<void> {
   fs.mkdirSync(path.dirname(input.outputPath), { recursive: true })
 
@@ -833,6 +895,7 @@ export async function renderJumpCutVideo(input: {
       outputPath: input.outputPath,
       cuts,
       indexOffset: 0,
+      onProgress: input.onProgress,
     })
     return
   }
@@ -845,18 +908,29 @@ export async function renderJumpCutVideo(input: {
   const parts: string[] = []
 
   try {
+    const totalPlay = keepSeconds
+    let donePlay = 0
     for (let i = 0; i < cuts.length; i += batchSize) {
       const slice = cuts.slice(i, i + batchSize)
+      const slicePlay = slice.reduce(
+        (sum, cut) => sum + (cut.end - cut.start) / cut.speed,
+        0,
+      )
       const partPath = path.join(tmpDir, `b${String(i).padStart(4, '0')}.mp4`)
       await renderSeekedBatch({
         ...batchInput,
         outputPath: partPath,
         cuts: slice,
         indexOffset: i,
+        onProgress: (ratio) =>
+          input.onProgress?.((donePlay + ratio * slicePlay) / Math.max(0.01, totalPlay)),
       })
+      donePlay += slicePlay
       parts.push(partPath)
     }
+    input.onProgress?.(0.98)
     await concatCopy(parts, input.outputPath)
+    input.onProgress?.(1)
   } finally {
     removeDirQuiet(tmpDir)
   }

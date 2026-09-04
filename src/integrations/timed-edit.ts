@@ -184,11 +184,56 @@ function spokenWordEnd(word: TimedWord) {
   return Math.max(word.end, word.start + minDur)
 }
 
+function wordToken(word: string) {
+  return word.replace(/[^A-Za-z0-9']/g, '').toLowerCase()
+}
+
+const CONTINUATION_START =
+  /^(and|but|or|so|because|that|which|who|if|when|while|all|then)$/i
+const HANGING_END =
+  /^(and|but|or|so|because|that|the|a|an|to|of|for|their|your|our|with|about|is|are|was|were)$/i
+
+function looksCompleteThought(text: string) {
+  const trimmed = text.replace(/\s+/g, ' ').trim()
+  if (!trimmed) return false
+  if (endsSpokenSentence(trimmed)) return true
+  const tokens = trimmed.split(' ').filter(Boolean)
+  if (tokens.length < 4) return false
+  const last = wordToken(tokens[tokens.length - 1] ?? '')
+  return Boolean(last) && !HANGING_END.test(last)
+}
+
+function shouldSplitThought(
+  prev: TimedWord,
+  next: TimedWord,
+  bucket: TimedWord[],
+  gap: number,
+) {
+  if (gap < 0.4) return false
+  const text = bucket
+    .map((word) => word.word.trim())
+    .filter(Boolean)
+    .join(' ')
+  const prevComplete =
+    endsSpokenSentence(prev.word) || endsSpokenSentence(text)
+  const nextContinues = CONTINUATION_START.test(wordToken(next.word))
+  const prevHangs = HANGING_END.test(wordToken(prev.word))
+  if (prevHangs) return false
+  if (!prevComplete && nextContinues && gap < 0.8) return false
+  if (prevComplete && gap >= 0.35) return true
+  if (gap >= 0.55 && bucket.length >= 4 && looksCompleteThought(text)) return true
+  return gap >= 0.85 && bucket.length >= 2
+}
+
 /** Group words into spoken thoughts (sentence / pause), not 5-word chunks. */
-export function wordsToSentenceCues(words: TimedWord[]): CaptionCue[] {
+export function wordsToSentenceCues(
+  words: TimedWord[],
+  opts?: { minPause?: number },
+): CaptionCue[] {
   if (!words.length) return []
   const cues: CaptionCue[] = []
   let bucket: TimedWord[] = []
+  const minPause = opts?.minPause ?? 0.4
 
   const flush = () => {
     if (!bucket.length) return
@@ -208,8 +253,9 @@ export function wordsToSentenceCues(words: TimedWord[]): CaptionCue[] {
 
   for (const w of words) {
     if (bucket.length) {
-      const gap = w.start - bucket[bucket.length - 1].end
-      if (gap >= 0.24) flush()
+      const prev = bucket[bucket.length - 1]
+      const gap = w.start - prev.end
+      if (gap >= minPause && shouldSplitThought(prev, w, bucket, gap)) flush()
     }
     bucket.push(w)
     if (endsSpokenSentence(w.word) && bucket.length >= 2) flush()
@@ -225,10 +271,16 @@ export function mergeSpokenPhrases(phrases: CaptionCue[]): CaptionCue[] {
     const prev = merged[merged.length - 1]
     const gap = prev ? phrase.start - prev.end : 99
     const dur = phrase.end - phrase.start
+    const nextContinues = CONTINUATION_START.test(
+      wordToken(phrase.text.split(/\s+/).filter(Boolean)[0] ?? ''),
+    )
     if (
       prev &&
       !endsSpokenSentence(prev.text) &&
-      (gap < 0.14 || (dur < 0.4 && gap < 0.35))
+      (gap < 0.4 ||
+        (dur < 0.45 && gap < 0.55) ||
+        (nextContinues && gap < 0.8) ||
+        (!looksCompleteThought(prev.text) && gap < 0.8))
     ) {
       prev.end = Math.max(prev.end, phrase.end)
       prev.text = `${prev.text} ${phrase.text}`.replace(/\s+/g, ' ').trim()
@@ -252,7 +304,8 @@ export function compactWordTimings(words: TimedWord[]): TimedWord[] {
     const expected = Math.min(1.05, Math.max(0.12, letters * 0.075 + 0.05))
     let { start, end } = word
     const dur = Math.max(0, end - start)
-    if (dur > Math.max(0.72, expected * 2.8)) {
+    const keepTail = endsSpokenSentence(word.word)
+    if (!keepTail && dur > Math.max(0.72, expected * 2.8)) {
       end = start + Math.max(expected * 1.2, Math.min(dur, expected + 0.22))
     }
     if (next && next.start - 0.02 > start) {
@@ -298,14 +351,15 @@ export function snapCutsToCompleteWords(
       const overlap =
         Math.min(cut.end, word.end) - Math.max(cut.start, word.start)
       const dur = Math.max(0.04, word.end - word.start)
-      return overlap > dur * 0.35 || overlap > 0.06
+      const startsInside = word.start >= cut.start && word.start < cut.end
+      return startsInside || overlap > dur * 0.2 || overlap > 0.04
     })
     if (!inside.length) continue
     snapped.push({
       start: Math.max(0, inside[0].start - 0.03),
       end: Math.min(
         durationSeconds,
-        inside[inside.length - 1].end + 0.08,
+        inside[inside.length - 1].end + 0.1,
       ),
     })
   }
@@ -338,6 +392,45 @@ export function mergeCutsSharingWords(
       cur.start = prev.end
     }
     if (cur.end - cur.start >= 0.16) out.push(cur)
+  }
+  return out
+}
+
+function wordsInCut(
+  cut: { start: number; end: number },
+  words: TimedWord[],
+) {
+  return words.filter((word) => word.end > cut.start && word.start < cut.end)
+}
+
+/** Keep a hanging clause with the next thought so we never end mid-idea. */
+export function mergeIncompleteThoughtCuts(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+): Array<{ start: number; end: number }> {
+  if (cuts.length < 2) return cuts
+  const sorted = mergeAdjacentCuts(cuts, 0.12)
+  const out = [{ ...sorted[0] }]
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = out[out.length - 1]
+    const cur = { ...sorted[i] }
+    const prevWords = wordsInCut(prev, words)
+    const curWords = wordsInCut(cur, words)
+    const prevText = prevWords.map((word) => word.word).join(' ')
+    const curStartsCont = CONTINUATION_START.test(
+      wordToken(curWords[0]?.word ?? ''),
+    )
+    const prevIncomplete = !looksCompleteThought(prevText)
+    const tooShort = prevWords.length < 4 || curWords.length < 3
+    const close = cur.start <= prev.end + 0.35
+    if (
+      (prevIncomplete && (curStartsCont || tooShort || close)) ||
+      (curWords.length < 3 && curStartsCont)
+    ) {
+      prev.end = Math.max(prev.end, cur.end)
+      continue
+    }
+    out.push(cur)
   }
   return out
 }
@@ -385,7 +478,7 @@ export function cutsFromPhrases(
   return merged.map((phrase, i) => {
     const next = merged[i + 1]
     const start = Math.max(0, phrase.start - 0.03)
-    let end = phrase.end + 0.08
+    let end = phrase.end + 0.1
     if (next && next.start > phrase.end) {
       end = Math.min(end, next.start - 0.03)
     }

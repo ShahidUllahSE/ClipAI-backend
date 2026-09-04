@@ -123,6 +123,7 @@ export async function processAsmrUnboxing(input: {
   keepAudio: boolean
   speedRamp?: 'off' | 'light' | 'medium' | 'aggressive'
   durationSeconds?: number
+  onProgress?: (percent: number, note?: string) => void
 }): Promise<AsmrResult> {
   const notes: string[] = [
     'ASMR/unboxing: keep product sounds & reveals, trim empty waiting',
@@ -237,12 +238,16 @@ export async function processAsmrUnboxing(input: {
     )
   }
 
+  input.onProgress?.(76, 'Cutting and exporting')
   await renderJumpCutVideo({
     inputPath: input.inputPath,
     outputPath: input.outputPath,
     cuts,
     keepAudio: input.keepAudio,
+    onProgress: (ratio) =>
+      input.onProgress?.(76 + ratio * 18, 'Cutting and exporting'),
   })
+  input.onProgress?.(94, 'Finishing export')
 
   const outputDurationSeconds = totalOutputDuration(cuts)
   const removedSeconds = Math.max(0, duration - keep)

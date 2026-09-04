@@ -90,6 +90,8 @@ const projectSchema = new Schema(
     sourceUrl: { type: String, required: true },
     outputUrl: { type: String, default: '' },
     errorMessage: { type: String, default: '' },
+    progressPercent: { type: Number, default: 0 },
+    progressNote: { type: String, default: '' },
     analysis: { type: Schema.Types.Mixed, default: null },
     editPlan: { type: Schema.Types.Mixed, default: null },
     creditCharged: { type: Boolean, default: false },

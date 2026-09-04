@@ -24,6 +24,7 @@ import {
   remapCuesToOutput,
   remapWordsToOutput,
   mergeCutsSharingWords,
+  mergeIncompleteThoughtCuts,
   snapCutsToCompleteWords,
   splitCutsBySilence,
   splitLongCaptionCues,
@@ -69,11 +70,11 @@ function gapThreshold(level: SilenceSensitivity) {
 function pauseMin(level: SilenceSensitivity) {
   switch (level) {
     case 'light':
-      return 0.55
+      return 1.05
     case 'aggressive':
-      return 0.32
+      return 0.7
     default:
-      return 0.42
+      return 0.85
   }
 }
 
@@ -374,8 +375,10 @@ export async function processTalkingHead(input: {
   durationSeconds?: number
   motion?: ClipMotion
   aspectRatio?: '9:16' | '1:1' | '16:9'
+  onProgress?: (percent: number, note?: string) => void
 }): Promise<TalkingHeadResult> {
   const notes: string[] = ['Talking-head: remove pauses / dead air between speech']
+  const report = (percent: number, note?: string) => input.onProgress?.(percent, note)
   const hasAudio = await probeHasAudio(input.inputPath)
   if (!hasAudio) {
     throw new Error(
@@ -400,6 +403,7 @@ export async function processTalkingHead(input: {
 
   try {
     if (env.GROQ_API_KEY) {
+      report(64, 'Transcribing speech')
       const stt = await transcribeSourceAudio(input.inputPath, duration, tempDir)
       transcript = stt.transcript
       words = stt.words
@@ -413,6 +417,7 @@ export async function processTalkingHead(input: {
           ? 'Transcript + phrase timings from Groq Whisper (chunked)'
           : 'Transcript + phrase timings from Groq Whisper',
       )
+      report(74, 'Building keep-segments')
 
       baseCuts = cutsFromPhrases(phrases, duration)
       if (baseCuts.length) {
@@ -422,43 +427,35 @@ export async function processTalkingHead(input: {
       }
 
       if (compactWords.length) {
-        const gapCuts = cutsFromWords(
+        baseCuts = mergeIncompleteThoughtCuts(
+          snapCutsToCompleteWords(baseCuts, compactWords, duration),
           compactWords,
-          duration,
-          input.silenceSensitivity,
         )
-        if (
-          gapCuts.length &&
-          (!baseCuts.length ||
-            totalKeepSeconds(gapCuts) < totalKeepSeconds(baseCuts) * 0.97)
-        ) {
-          baseCuts = gapCuts
-          notes.push(
-            `Speech-gap tighten (${input.silenceSensitivity}): ${baseCuts.length} keep-segments`,
-          )
-        }
-        baseCuts = snapCutsToCompleteWords(baseCuts, compactWords, duration)
 
         try {
           silenceRanges = await detectTalkingHeadPauses(input.inputPath)
-          const refined = snapCutsToCompleteWords(
-            splitCutsBySilence(
-              baseCuts,
-              silenceRanges,
-              pauseMin(input.silenceSensitivity),
+          const refined = mergeIncompleteThoughtCuts(
+            snapCutsToCompleteWords(
+              splitCutsBySilence(
+                baseCuts,
+                silenceRanges,
+                pauseMin(input.silenceSensitivity),
+              ),
+              compactWords,
+              duration,
             ),
             compactWords,
-            duration,
           )
           if (
             refined.length &&
+            refined.length <= baseCuts.length + 2 &&
             wordCoverage(refined, compactWords) >=
-              wordCoverage(baseCuts, compactWords) * 0.96 &&
-            totalKeepSeconds(refined) < totalKeepSeconds(baseCuts) - 0.35
+              wordCoverage(baseCuts, compactWords) * 0.98 &&
+            totalKeepSeconds(refined) < totalKeepSeconds(baseCuts) - 0.5
           ) {
             baseCuts = mergeCutsSharingWords(refined, compactWords)
             notes.push(
-              `Dropped leftover pauses inside speech: ${baseCuts.length} keep-segments`,
+              `Dropped leftover pauses between thoughts: ${baseCuts.length} keep-segments`,
             )
           } else {
             baseCuts = mergeCutsSharingWords(baseCuts, compactWords)
@@ -495,12 +492,25 @@ export async function processTalkingHead(input: {
   let removedSeconds = Math.max(0, duration - keepSeconds)
 
   if (removedSeconds < Math.min(1, duration * 0.05) && words.length > 2) {
-    const aggressiveCuts = cutsFromWords(words, duration, 'aggressive')
-    if (totalKeepSeconds(aggressiveCuts) < keepSeconds) {
-      baseCuts = aggressiveCuts
+    const compactRetry = compactWordTimings(words)
+    const tighterCuts = mergeIncompleteThoughtCuts(
+      snapCutsToCompleteWords(
+        cutsFromPhrases(
+          mergeSpokenPhrases(
+            wordsToSentenceCues(compactRetry, { minPause: 0.45 }),
+          ),
+          duration,
+        ),
+        compactRetry,
+        duration,
+      ),
+      compactRetry,
+    )
+    if (tighterCuts.length && totalKeepSeconds(tighterCuts) < keepSeconds) {
+      baseCuts = tighterCuts
       keepSeconds = totalKeepSeconds(baseCuts)
       removedSeconds = Math.max(0, duration - keepSeconds)
-      notes.push('Applied aggressive speech-gap pass for a clearer edit')
+      notes.push('Applied tighter thought-pause pass for a clearer edit')
     }
   }
 
@@ -521,6 +531,7 @@ export async function processTalkingHead(input: {
     )
   }
 
+  report(76, 'Cutting and exporting')
   await renderJumpCutVideo({
     inputPath: input.inputPath,
     outputPath: input.outputPath,
@@ -528,7 +539,9 @@ export async function processTalkingHead(input: {
     keepAudio: input.keepAudio,
     motion: input.motion ?? 'punch',
     aspectRatio,
+    onProgress: (ratio) => report(76 + ratio * 18, 'Cutting and exporting'),
   })
+  report(94, 'Finishing export')
   if ((input.motion ?? 'punch') !== 'none') {
     notes.push(
       `Jump-cut motion: ${input.motion ?? 'punch'} (full-body overall, light punch-in)`,
@@ -609,6 +622,7 @@ export async function processTalkingHead(input: {
         keyframing: false,
         keyframePreset: 'speaker-punch-in' as const,
       }
+      report(95, 'Adding captions')
       try {
         await burnTimedCaptions({
           inputPath: input.outputPath,

@@ -190,16 +190,64 @@ function clipMotionFromTimeline(timelineJson: unknown): ClipMotion {
   return 'punch'
 }
 
+const STATUS_PROGRESS: Record<string, number> = {
+  Queued: 6,
+  Analyzing: 20,
+  'Preparing edit': 48,
+  Rendering: 62,
+  Completed: 100,
+}
+
+async function setProgress(
+  projectId: string,
+  percent: number,
+  note?: string,
+) {
+  const progressPercent = Math.round(Math.min(100, Math.max(0, percent)))
+  await ProjectModel.updateOne(
+    { _id: projectId },
+    {
+      $set: {
+        progressPercent,
+        ...(note ? { progressNote: note } : {}),
+      },
+    },
+  )
+}
+
+function createProgressWriter(projectId: string) {
+  let lastAt = 0
+  let lastPercent = -1
+  return (percent: number, note?: string) => {
+    const next = Math.round(Math.min(99, Math.max(0, percent)))
+    const now = Date.now()
+    if (next === lastPercent) return
+    if (now - lastAt < 400 && next < lastPercent + 2 && next < 99) return
+    lastAt = now
+    lastPercent = next
+    void setProgress(projectId, next, note)
+  }
+}
+
 async function setStatus(
   projectId: string,
   jobId: string,
   status: ProjectStatus,
   note = '',
 ) {
+  const progressPercent = STATUS_PROGRESS[status]
   await Promise.all([
     ProjectModel.updateOne(
       { _id: projectId },
-      { $set: { status, errorMessage: status === 'Failed' ? note : '' } },
+      {
+        $set: {
+          status,
+          errorMessage: status === 'Failed' ? note : '',
+          ...(progressPercent != null
+            ? { progressPercent, progressNote: note }
+            : {}),
+        },
+      },
     ),
     JobModel.updateOne(
       { _id: jobId },
@@ -343,6 +391,8 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       project.outputUrl = deliveryUrl
       project.status = 'Completed'
+      project.progressPercent = 100
+      project.progressNote = 'Done'
       project.errorMessage = ''
       await project.save()
 
@@ -395,6 +445,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       await setStatus(projectId, jobId, 'Rendering', 'Cutting silence with FFmpeg')
 
+      const writeProgress = createProgressWriter(projectId)
       const result = await processTalkingHead({
         inputPath: upload.storagePath,
         outputPath: cutPath,
@@ -407,6 +458,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         durationSeconds: project.durationSeconds,
         motion: clipMotionFromTimeline(options.timelineJson),
         aspectRatio: options.aspectRatio,
+        onProgress: writeProgress,
       })
 
       await setStatus(
@@ -573,6 +625,8 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       project.outputUrl = deliveryUrl
       project.status = 'Completed'
+      project.progressPercent = 100
+      project.progressNote = 'Done'
       project.errorMessage = ''
       await project.save()
 
@@ -629,6 +683,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         'Cutting empty waits with FFmpeg',
       )
 
+      const writeProgress = createProgressWriter(projectId)
       const result = await processAsmrUnboxing({
         inputPath: upload.storagePath,
         outputPath: cutPath,
@@ -639,6 +694,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         keepAudio: options.keepAudio,
         speedRamp: options.speedRamp,
         durationSeconds: project.durationSeconds,
+        onProgress: writeProgress,
       })
 
       await setStatus(
@@ -755,6 +811,8 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       project.outputUrl = deliveryUrl
       project.status = 'Completed'
+      project.progressPercent = 100
+      project.progressNote = 'Done'
       project.errorMessage = ''
       await project.save()
 
@@ -831,6 +889,8 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
     project.outputUrl = render.outputUrl
     project.status = 'Completed'
+    project.progressPercent = 100
+    project.progressNote = 'Done'
     project.errorMessage = ''
     await project.save()
 
