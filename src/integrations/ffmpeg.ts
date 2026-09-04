@@ -99,9 +99,9 @@ async function runFfmpeg(args: string[], timeoutMs = 25 * 60 * 1000) {
   })
 }
 
-export async function detectSilenceRanges(
+async function detectSilenceWithFilter(
   filePath: string,
-  level: SilenceSensitivity = 'medium',
+  filter: string,
 ): Promise<Array<{ start: number; end: number }>> {
   const args = [
     '-hide_banner',
@@ -113,7 +113,7 @@ export async function detectSilenceRanges(
     '-map',
     '0:a:0',
     '-af',
-    silenceFilter(level),
+    filter,
     '-f',
     'null',
     '-',
@@ -132,6 +132,23 @@ export async function detectSilenceRanges(
         : ''
     return parseSilenceLog(stderr)
   }
+}
+
+export async function detectSilenceRanges(
+  filePath: string,
+  level: SilenceSensitivity = 'medium',
+): Promise<Array<{ start: number; end: number }>> {
+  return detectSilenceWithFilter(filePath, silenceFilter(level))
+}
+
+/** Dead-air pauses inside talking-head speech, without treating quiet speech as silence. */
+export async function detectTalkingHeadPauses(
+  filePath: string,
+): Promise<Array<{ start: number; end: number }>> {
+  return detectSilenceWithFilter(
+    filePath,
+    'silencedetect=noise=-34dB:d=0.26',
+  )
 }
 
 function parseSilenceLog(log: string) {

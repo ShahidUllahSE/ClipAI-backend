@@ -4,8 +4,10 @@ import { env } from '../config'
 import type { ProjectOptionsDto } from '../modules/project/project.types'
 import {
   detectSilenceRanges,
+  detectTalkingHeadPauses,
   extractAudioForStt,
   extractAudioSlice,
+  probeDisplaySize,
   probeDuration,
   probeHasAudio,
   renderJumpCutVideo,
@@ -16,10 +18,14 @@ import {
 import {
   assFontSizeFromUi,
   assignSegmentSpeeds,
+  compactWordTimings,
   cutsFromPhrases,
   mergeSpokenPhrases,
   remapCuesToOutput,
   remapWordsToOutput,
+  mergeCutsSharingWords,
+  snapCutsToCompleteWords,
+  splitCutsBySilence,
   splitLongCaptionCues,
   totalOutputDuration,
   wordsToCaptionCues,
@@ -45,17 +51,50 @@ export interface TalkingHeadResult {
   outputUrl: string
   notes: string[]
   removedSeconds: number
+  /** Final frame size after landscape talking-head is kept 16:9. */
+  aspectRatio: '9:16' | '1:1' | '16:9'
 }
 
 function gapThreshold(level: SilenceSensitivity) {
   switch (level) {
     case 'light':
-      return 0.72
+      return 0.42
     case 'aggressive':
-      return 0.28
+      return 0.22
     default:
-      return 0.38
+      return 0.28
   }
+}
+
+function pauseMin(level: SilenceSensitivity) {
+  switch (level) {
+    case 'light':
+      return 0.55
+    case 'aggressive':
+      return 0.32
+    default:
+      return 0.42
+  }
+}
+
+/** Landscape talking-head stays 16:9 so the speaker is not chopped into 9:16. */
+export function talkingHeadOutputAspect(
+  requested: '9:16' | '1:1' | '16:9' | undefined,
+  portrait: boolean,
+): '9:16' | '1:1' | '16:9' {
+  if (!portrait && requested === '9:16') return '16:9'
+  if (requested) return requested
+  return portrait ? '9:16' : '16:9'
+}
+
+function wordCoverage(
+  cuts: Array<{ start: number; end: number }>,
+  words: Array<{ word: string; start: number; end: number }>,
+) {
+  if (!words.length) return 0
+  return words.filter((word) =>
+    cuts.some((cut) => word.end > cut.start && word.start < cut.end),
+  ).length
 }
 
 /** Build keep-cuts from word timestamps (true talking-head jump cuts). */
@@ -65,27 +104,29 @@ export function cutsFromWords(
   level: SilenceSensitivity,
 ): Array<{ start: number; end: number }> {
   if (!words.length) return []
+  const compact = compactWordTimings(words)
   const minGap = gapThreshold(level)
   const silenceRanges: Array<{ start: number; end: number }> = []
 
-  if (words[0].start > 0.25) {
-    silenceRanges.push({ start: 0, end: words[0].start })
+  if (compact[0].start > 0.2) {
+    silenceRanges.push({ start: 0, end: compact[0].start })
   }
-  for (let i = 1; i < words.length; i++) {
-    const gap = words[i].start - words[i - 1].end
+  for (let i = 1; i < compact.length; i++) {
+    const gap = compact[i].start - compact[i - 1].end
     if (gap >= minGap) {
-      silenceRanges.push({ start: words[i - 1].end, end: words[i].start })
+      silenceRanges.push({ start: compact[i - 1].end, end: compact[i].start })
     }
   }
-  const last = words[words.length - 1]
-  if (durationSeconds - last.end > 0.25) {
+  const last = compact[compact.length - 1]
+  if (durationSeconds - last.end > 0.2) {
     silenceRanges.push({ start: last.end, end: durationSeconds })
   }
 
-  return silenceToKeepCuts(silenceRanges, durationSeconds, 0.12).map((cut) => ({
-    start: cut.start,
-    end: Math.max(cut.start + 0.16, cut.end - 0.04),
-  }))
+  return snapCutsToCompleteWords(
+    silenceToKeepCuts(silenceRanges, durationSeconds, 0.16),
+    compact,
+    durationSeconds,
+  )
 }
 
 function totalKeepSeconds(cuts: Array<{ start: number; end: number }>) {
@@ -362,8 +403,9 @@ export async function processTalkingHead(input: {
       const stt = await transcribeSourceAudio(input.inputPath, duration, tempDir)
       transcript = stt.transcript
       words = stt.words
-      phrases = words.length
-        ? mergeSpokenPhrases(wordsToSentenceCues(words))
+      const compactWords = compactWordTimings(words)
+      phrases = compactWords.length
+        ? mergeSpokenPhrases(wordsToSentenceCues(compactWords))
         : mergeSpokenPhrases(stt.phrases)
       provider = 'ffmpeg+groq'
       notes.push(
@@ -378,18 +420,54 @@ export async function processTalkingHead(input: {
           `Jump cuts on spoken thoughts: ${baseCuts.length} keep-segments`,
         )
       }
-      if (
-        !baseCuts.length ||
-        totalKeepSeconds(baseCuts) > duration * 0.92
-      ) {
-        const gapCuts = cutsFromWords(words, duration, input.silenceSensitivity)
+
+      if (compactWords.length) {
+        const gapCuts = cutsFromWords(
+          compactWords,
+          duration,
+          input.silenceSensitivity,
+        )
         if (
           gapCuts.length &&
-          (!baseCuts.length || totalKeepSeconds(gapCuts) < totalKeepSeconds(baseCuts))
+          (!baseCuts.length ||
+            totalKeepSeconds(gapCuts) < totalKeepSeconds(baseCuts) * 0.97)
         ) {
           baseCuts = gapCuts
           notes.push(
-            `Speech-gap fallback (${input.silenceSensitivity}): ${baseCuts.length} keep-segments`,
+            `Speech-gap tighten (${input.silenceSensitivity}): ${baseCuts.length} keep-segments`,
+          )
+        }
+        baseCuts = snapCutsToCompleteWords(baseCuts, compactWords, duration)
+
+        try {
+          silenceRanges = await detectTalkingHeadPauses(input.inputPath)
+          const refined = snapCutsToCompleteWords(
+            splitCutsBySilence(
+              baseCuts,
+              silenceRanges,
+              pauseMin(input.silenceSensitivity),
+            ),
+            compactWords,
+            duration,
+          )
+          if (
+            refined.length &&
+            wordCoverage(refined, compactWords) >=
+              wordCoverage(baseCuts, compactWords) * 0.96 &&
+            totalKeepSeconds(refined) < totalKeepSeconds(baseCuts) - 0.35
+          ) {
+            baseCuts = mergeCutsSharingWords(refined, compactWords)
+            notes.push(
+              `Dropped leftover pauses inside speech: ${baseCuts.length} keep-segments`,
+            )
+          } else {
+            baseCuts = mergeCutsSharingWords(baseCuts, compactWords)
+          }
+        } catch (error) {
+          notes.push(
+            `Pause refine skipped: ${
+              error instanceof Error ? error.message.slice(0, 120) : 'ffmpeg error'
+            }`,
           )
         }
       }
@@ -435,13 +513,21 @@ export async function processTalkingHead(input: {
     notes.push(`Segment speed ramp: ${speedLevel} (important speech @1×)`)
   }
 
+  const display = await probeDisplaySize(input.inputPath)
+  const aspectRatio = talkingHeadOutputAspect(input.aspectRatio, display.portrait)
+  if (aspectRatio !== (input.aspectRatio ?? '9:16')) {
+    notes.push(
+      `Kept ${aspectRatio} so the speaker stays fully in frame (source is landscape)`,
+    )
+  }
+
   await renderJumpCutVideo({
     inputPath: input.inputPath,
     outputPath: input.outputPath,
     cuts,
     keepAudio: input.keepAudio,
     motion: input.motion ?? 'punch',
-    aspectRatio: input.aspectRatio ?? '9:16',
+    aspectRatio,
   })
   if ((input.motion ?? 'punch') !== 'none') {
     notes.push(
@@ -500,25 +586,28 @@ export async function processTalkingHead(input: {
         path.dirname(input.outputPath),
         `${path.basename(input.outputPath, '.mp4')}.captioned.mp4`,
       )
-      const burnOptions = input.captionOptions ?? {
-        captions: true,
-        captionPosition: 'bottom' as const,
-        captionFontFamily: 'arial' as const,
-        captionFontSize: 22 as const,
-        captionColor: 'white' as const,
-        aspectRatio: input.aspectRatio ?? '9:16',
-        silenceSensitivity: input.silenceSensitivity,
-        pacing: 'fast' as const,
-        speedRamp: 'off' as const,
+      const burnOptions = {
+        ...(input.captionOptions ?? {
+          captions: true,
+          captionPosition: 'bottom' as const,
+          captionFontFamily: 'arial' as const,
+          captionFontSize: 22 as const,
+          captionColor: 'white' as const,
+          silenceSensitivity: input.silenceSensitivity,
+          pacing: 'fast' as const,
+          speedRamp: 'off' as const,
+          keepAudio: true,
+          audioNormalize: false,
+          cropPreset: 'none' as const,
+          colorGrade: 'none' as const,
+          fadeInOut: false,
+          mirrorHorizontal: false,
+          introTitleCard: false,
+        }),
+        aspectRatio,
+        cropPreset: 'none' as const,
         keyframing: false,
         keyframePreset: 'speaker-punch-in' as const,
-        keepAudio: true,
-        audioNormalize: false,
-        cropPreset: 'none' as const,
-        colorGrade: 'none' as const,
-        fadeInOut: false,
-        mirrorHorizontal: false,
-        introTitleCard: false,
       }
       try {
         await burnTimedCaptions({
@@ -563,5 +652,6 @@ export async function processTalkingHead(input: {
     outputUrl: input.outputUrl,
     notes,
     removedSeconds: Math.max(0, duration - keepSeconds),
+    aspectRatio,
   }
 }

@@ -479,7 +479,13 @@ export async function runJobPipeline(jobId: string, projectId: string) {
             projectId,
             cutPath,
             outputPath,
-            options,
+            options: {
+              ...options,
+              aspectRatio: result.aspectRatio,
+              // Jump-cut already framed the speaker. Extra 9:16 punch-in chops heads.
+              cropPreset: 'none',
+              keyframing: false,
+            },
             title: naming.title,
             captionLine: result.transcript?.slice(0, 90),
             existingCaptionsPath: result.captionsPath,

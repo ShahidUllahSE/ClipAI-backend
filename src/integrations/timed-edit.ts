@@ -209,7 +209,7 @@ export function wordsToSentenceCues(words: TimedWord[]): CaptionCue[] {
   for (const w of words) {
     if (bucket.length) {
       const gap = w.start - bucket[bucket.length - 1].end
-      if (gap >= 0.28) flush()
+      if (gap >= 0.24) flush()
     }
     bucket.push(w)
     if (endsSpokenSentence(w.word) && bucket.length >= 2) flush()
@@ -240,6 +240,141 @@ export function mergeSpokenPhrases(phrases: CaptionCue[]): CaptionCue[] {
 }
 
 /**
+ * Whisper often parks trailing hush on the last word before a pause.
+ * Pull those ends back so gaps become real jump-cut points, without
+ * shortening a word below a complete spoken duration.
+ */
+export function compactWordTimings(words: TimedWord[]): TimedWord[] {
+  if (!words.length) return []
+  return words.map((word, i) => {
+    const next = words[i + 1]
+    const letters = word.word.replace(/[^A-Za-z0-9]/g, '').length
+    const expected = Math.min(1.05, Math.max(0.12, letters * 0.075 + 0.05))
+    let { start, end } = word
+    const dur = Math.max(0, end - start)
+    if (dur > Math.max(0.72, expected * 2.8)) {
+      end = start + Math.max(expected * 1.2, Math.min(dur, expected + 0.22))
+    }
+    if (next && next.start - 0.02 > start) {
+      end = Math.min(end, next.start - 0.02)
+    }
+    return {
+      ...word,
+      start,
+      end: Math.max(start + 0.08, end),
+    }
+  })
+}
+
+export function mergeAdjacentCuts(
+  cuts: Array<{ start: number; end: number }>,
+  maxGap = 0.1,
+): Array<{ start: number; end: number }> {
+  if (!cuts.length) return []
+  const sorted = [...cuts].sort((a, b) => a.start - b.start)
+  const out = [{ ...sorted[0] }]
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = out[out.length - 1]
+    if (sorted[i].start <= prev.end + maxGap) {
+      prev.end = Math.max(prev.end, sorted[i].end)
+    } else {
+      out.push({ ...sorted[i] })
+    }
+  }
+  return out
+}
+
+/** Expand/shrink keep-cuts to full words so we never clip a syllable. */
+export function snapCutsToCompleteWords(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+  durationSeconds: number,
+): Array<{ start: number; end: number }> {
+  if (!cuts.length) return []
+  if (!words.length) return mergeAdjacentCuts(cuts)
+  const snapped: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
+    const inside = words.filter((word) => {
+      const overlap =
+        Math.min(cut.end, word.end) - Math.max(cut.start, word.start)
+      const dur = Math.max(0.04, word.end - word.start)
+      return overlap > dur * 0.35 || overlap > 0.06
+    })
+    if (!inside.length) continue
+    snapped.push({
+      start: Math.max(0, inside[0].start - 0.03),
+      end: Math.min(
+        durationSeconds,
+        inside[inside.length - 1].end + 0.08,
+      ),
+    })
+  }
+  return mergeCutsSharingWords(mergeAdjacentCuts(snapped, 0.18), words)
+}
+
+/** Merge keep-cuts that share a spoken word so that word is not played twice. */
+export function mergeCutsSharingWords(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+): Array<{ start: number; end: number }> {
+  if (!cuts.length) return []
+  const sorted = mergeAdjacentCuts(cuts, 0.18)
+  const out = [{ ...sorted[0] }]
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = out[out.length - 1]
+    const cur = { ...sorted[i] }
+    const shared = words.some(
+      (word) =>
+        word.end > prev.start &&
+        word.start < prev.end &&
+        word.end > cur.start &&
+        word.start < cur.end,
+    )
+    if (shared || cur.start <= prev.end + 0.02) {
+      prev.end = Math.max(prev.end, cur.end)
+      continue
+    }
+    if (cur.start < prev.end) {
+      cur.start = prev.end
+    }
+    if (cur.end - cur.start >= 0.16) out.push(cur)
+  }
+  return out
+}
+
+/** Drop dead-air holes inside keep-cuts (FFmpeg silence ranges). */
+export function splitCutsBySilence(
+  cuts: Array<{ start: number; end: number }>,
+  silenceRanges: Array<{ start: number; end: number }>,
+  minSilence = 0.28,
+): Array<{ start: number; end: number }> {
+  if (!cuts.length) return []
+  if (!silenceRanges.length) return cuts
+  const holes = [...silenceRanges]
+    .filter((range) => range.end - range.start >= minSilence)
+    .sort((a, b) => a.start - b.start)
+  if (!holes.length) return cuts
+
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
+    let cursor = cut.start
+    for (const hole of holes) {
+      const start = Math.max(cut.start, hole.start)
+      const end = Math.min(cut.end, hole.end)
+      if (end - start < minSilence) continue
+      if (start > cursor + 0.16) {
+        out.push({ start: cursor, end: start })
+      }
+      cursor = Math.max(cursor, end)
+    }
+    if (cut.end > cursor + 0.16) {
+      out.push({ start: cursor, end: cut.end })
+    }
+  }
+  return out
+}
+
+/**
  * Keep each spoken thought as one cut. Drop pauses between thoughts.
  */
 export function cutsFromPhrases(
@@ -249,8 +384,8 @@ export function cutsFromPhrases(
   const merged = mergeSpokenPhrases(phrases)
   return merged.map((phrase, i) => {
     const next = merged[i + 1]
-    const start = Math.max(0, phrase.start - 0.04)
-    let end = phrase.end + 0.2
+    const start = Math.max(0, phrase.start - 0.03)
+    let end = phrase.end + 0.08
     if (next && next.start > phrase.end) {
       end = Math.min(end, next.start - 0.03)
     }
