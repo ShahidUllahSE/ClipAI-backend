@@ -456,7 +456,7 @@ export async function processTalkingHead(input: {
 
   let captionsPath: string | undefined
   let captionsBurned = false
-  const wantCaptions = input.captions !== false
+  const wantCaptions = Boolean(input.captions)
   if (wantCaptions) {
     const cues = words.length
       ? wordsToCaptionCues(remapWordsToOutput(words, cuts))
