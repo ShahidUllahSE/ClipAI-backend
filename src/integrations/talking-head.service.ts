@@ -16,6 +16,10 @@ import {
   type SilenceSensitivity,
 } from './ffmpeg'
 import {
+  extraZoomByCutFromTimeline,
+  perCutMotionsFromTimeline,
+} from './timeline-fx'
+import {
   assFontSizeFromUi,
   assignSegmentSpeeds,
   compactWordTimings,
@@ -374,6 +378,7 @@ export async function processTalkingHead(input: {
   captionOptions?: ProjectOptionsDto
   durationSeconds?: number
   motion?: ClipMotion
+  timelineJson?: unknown
   aspectRatio?: '9:16' | '1:1' | '16:9'
   onProgress?: (percent: number, note?: string) => void
 }): Promise<TalkingHeadResult> {
@@ -532,20 +537,29 @@ export async function processTalkingHead(input: {
   }
 
   report(76, 'Cutting and exporting')
+  const perCutMotions = perCutMotionsFromTimeline(input.timelineJson, cuts.length)
+  const extraZoomByCut = extraZoomByCutFromTimeline(input.timelineJson, cuts)
   await renderJumpCutVideo({
     inputPath: input.inputPath,
     outputPath: input.outputPath,
     cuts,
     keepAudio: input.keepAudio,
     motion: input.motion ?? 'punch',
+    perCutMotions,
+    extraZoomByCut,
     aspectRatio,
     onProgress: (ratio) => report(76 + ratio * 18, 'Cutting and exporting'),
   })
   report(94, 'Finishing export')
-  if ((input.motion ?? 'punch') !== 'none') {
+  if (perCutMotions?.length) {
+    notes.push(`Applied ${perCutMotions[0]} to every keep-segment`)
+  } else if ((input.motion ?? 'punch') !== 'none') {
     notes.push(
       `Jump-cut motion: ${input.motion ?? 'punch'} (full-body overall, light punch-in)`,
     )
+  }
+  if (extraZoomByCut?.length) {
+    notes.push('Manual zoom keyframes baked into keep-segments')
   }
 
   const outputDurationSeconds = totalOutputDuration(cuts)

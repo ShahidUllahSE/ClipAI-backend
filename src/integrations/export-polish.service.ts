@@ -5,7 +5,7 @@ import path from 'path'
 import { promisify } from 'util'
 import { env } from '../config'
 import type { ProjectOptionsDto } from '../modules/project/project.types'
-import { FFMPEG, probeDuration, probeHasAudio } from './ffmpeg'
+import { FFMPEG, exportFps, probeDuration, probeFrameRate, probeHasAudio } from './ffmpeg'
 import {
   assFontSizeFromUi,
   parseSrtFile,
@@ -79,12 +79,6 @@ function escapeDrawText(text: string) {
 }
 
 function targetSize(aspect: ProjectOptionsDto['aspectRatio']) {
-  // Prefer 720p on FAST_EXPORT for much faster VPS encodes
-  if (env.fastExport) {
-    if (aspect === '1:1') return { w: 720, h: 720 }
-    if (aspect === '16:9') return { w: 1280, h: 720 }
-    return { w: 720, h: 1280 }
-  }
   if (aspect === '1:1') return { w: 1080, h: 1080 }
   if (aspect === '16:9') return { w: 1920, h: 1080 }
   return { w: 1080, h: 1920 }
@@ -127,10 +121,23 @@ function speedFactor(level: ProjectOptionsDto['speedRamp']) {
   }
 }
 
+function timelineManualZoom(options: ProjectOptionsDto) {
+  const json = options.timelineJson as {
+    output?: { zoom?: number }
+    timeline?: { tracks?: Array<{ clips?: Array<{ zoom?: number }> }> }
+  } | null
+  const raw = Number(
+    json?.output?.zoom ?? json?.timeline?.tracks?.[0]?.clips?.[0]?.zoom,
+  )
+  if (!Number.isFinite(raw)) return 1
+  return Math.min(2.4, Math.max(0.8, raw))
+}
+
 function cropZoom(
   preset: ProjectOptionsDto['cropPreset'],
   keyframing: boolean,
   keyframePreset: ProjectOptionsDto['keyframePreset'],
+  manualZoom = 1,
 ) {
   let zoom = 1
   if (preset === 'center') zoom = 1.08
@@ -144,7 +151,7 @@ function cropZoom(
     if (keyframePreset === 'slow-zoom-out') zoom = Math.max(zoom, 1.06)
   }
 
-  return zoom
+  return zoom * (Number.isFinite(manualZoom) ? manualZoom : 1)
 }
 
 function gradeFilter(grade: ProjectOptionsDto['colorGrade']) {
@@ -181,6 +188,8 @@ export async function applyExportPolish(input: {
   /** When true, skip whole-video speed (already applied per segment). */
   segmentSpeedApplied?: boolean
   durationSeconds?: number
+  /** Talking-head already baked editor zoom into the jump-cut. */
+  ignoreTimelineZoom?: boolean
 }): Promise<{ notes: string[]; durationSeconds: number }> {
   const notes: string[] = ['ClipAI studio polish (local FFmpeg)']
   const options = input.options
@@ -190,12 +199,15 @@ export async function applyExportPolish(input: {
       : await probeDuration(input.inputPath)
 
   const { w, h } = targetSize(options.aspectRatio)
-  notes.push(`Aspect ${options.aspectRatio} → ${w}x${h}`)
+  const fps = exportFps(await probeFrameRate(input.inputPath))
+  notes.push(`Aspect ${options.aspectRatio} → ${w}x${h} @ ${fps}fps`)
 
+  const manualZoom = input.ignoreTimelineZoom ? 1 : timelineManualZoom(options)
   const zoom = cropZoom(
     options.cropPreset,
     options.keyframing,
     options.keyframePreset,
+    manualZoom,
   )
   if (options.cropPreset !== 'none' || zoom > 1.01) {
     notes.push(
@@ -204,10 +216,14 @@ export async function applyExportPolish(input: {
         : `Crop ${options.cropPreset}`,
     )
   }
+  if (manualZoom > 1.02 || manualZoom < 0.98) {
+    notes.push(`Manual zoom ${manualZoom.toFixed(2)}×`)
+  }
 
   const vf: string[] = [
     `scale=${w}:${h}:force_original_aspect_ratio=increase`,
     `crop=${w}:${h}:(iw-ow)/2:${cropYExpr(options.cropPreset)}`,
+    `fps=${fps}`,
   ]
 
   if (zoom > 1.01) {
@@ -334,7 +350,7 @@ export async function applyExportPolish(input: {
     const args = ['-y', '-i', input.inputPath, '-vf', videoFilters.join(',')]
     if (mapAudio) {
       if (audioFilters.length) args.push('-af', audioFilters.join(','))
-      args.push('-c:a', 'aac', '-b:a', '128k')
+      args.push('-c:a', 'aac', '-b:a', '192k')
     } else {
       args.push('-an')
     }
@@ -344,7 +360,9 @@ export async function applyExportPolish(input: {
       '-preset',
       'ultrafast',
       '-crf',
-      env.fastExport ? '28' : '26',
+      '23',
+      '-r',
+      String(fps),
       '-movflags',
       '+faststart',
       '-pix_fmt',
@@ -413,6 +431,7 @@ export async function burnTimedCaptions(input: {
   options: ProjectOptionsDto
 }): Promise<void> {
   const tmpAss = materializeAssCaptions(input.captionsPath, input.options, 'cap')
+  const fps = exportFps(await probeFrameRate(input.inputPath))
   try {
     await execFileAsync(
       FFMPEG,
@@ -423,13 +442,15 @@ export async function burnTimedCaptions(input: {
         '-i',
         input.inputPath,
         '-vf',
-        subtitlesFilter(tmpAss),
+        `${subtitlesFilter(tmpAss)},fps=${fps}`,
         '-c:v',
         'libx264',
         '-preset',
         'ultrafast',
         '-crf',
-        env.fastExport ? '28' : '26',
+        '23',
+        '-r',
+        String(fps),
         '-pix_fmt',
         'yuv420p',
         '-c:a',

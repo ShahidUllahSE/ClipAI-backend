@@ -8,7 +8,7 @@ import {
   geminiGenerateText,
   geminiGenerateWithImages,
 } from './gemini'
-import { FFMPEG, probeDuration, probeHasAudio } from './ffmpeg'
+import { FFMPEG, exportFps, probeDuration, probeFrameRate, probeHasAudio } from './ffmpeg'
 
 const execFileAsync = promisify(execFile)
 
@@ -70,8 +70,9 @@ const TRANSITION_SET = new Set<CombineTransition>([
   'radial',
 ])
 
-const SCALE_PAD =
-  'scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30,format=yuv420p'
+function scalePad(fps: 30 | 60) {
+  return `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps},format=yuv420p`
+}
 
 function sanitizeTransition(value: string | undefined): CombineTransition {
   if (value && TRANSITION_SET.has(value as CombineTransition)) {
@@ -403,6 +404,8 @@ async function extractMomentClip(input: {
   outputPath: string
   keepAudio: boolean
 }): Promise<void> {
+  const fps = exportFps(await probeFrameRate(input.sourcePath))
+  const pad = scalePad(fps)
   const hasAudio = await probeHasAudio(input.sourcePath)
   const args = [
     '-y',
@@ -413,12 +416,12 @@ async function extractMomentClip(input: {
     '-i',
     input.sourcePath,
     '-vf',
-    SCALE_PAD,
+    pad,
     '-an',
   ]
 
   if (input.keepAudio && hasAudio) {
-    args.splice(args.indexOf('-an'), 1, '-c:a', 'aac', '-b:a', '96k', '-ac', '2', '-ar', '44100')
+    args.splice(args.indexOf('-an'), 1, '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '44100')
   }
 
   args.push(
@@ -427,7 +430,9 @@ async function extractMomentClip(input: {
     '-preset',
     'ultrafast',
     '-crf',
-    '28',
+    '23',
+    '-r',
+    String(fps),
     '-movflags',
     '+faststart',
     input.outputPath,
@@ -479,10 +484,14 @@ export async function renderHighlightCombine(input: {
     return { outputDurationSeconds: dur, notes }
   }
 
-  const [hasAudioA, hasAudioB] = await Promise.all([
+  const [hasAudioA, hasAudioB, fpsA, fpsB] = await Promise.all([
     probeHasAudio(input.pathA),
     probeHasAudio(input.pathB),
+    probeFrameRate(input.pathA),
+    probeFrameRate(input.pathB),
   ])
+  const fps = exportFps(Math.max(fpsA, fpsB))
+  const pad = scalePad(fps)
   const useAudio =
     input.keepAudio &&
     clips.every((c) => (c.source === 'a' ? hasAudioA : hasAudioB))
@@ -499,7 +508,7 @@ export async function renderHighlightCombine(input: {
     const clip = clips[i]
     const inputIdx = clip.source === 'a' ? 0 : 1
     filters.push(
-      `[${inputIdx}:v]trim=start=${clip.start.toFixed(3)}:end=${clip.end.toFixed(3)},setpts=PTS-STARTPTS,${SCALE_PAD}[v${i}]`,
+      `[${inputIdx}:v]trim=start=${clip.start.toFixed(3)}:end=${clip.end.toFixed(3)},setpts=PTS-STARTPTS,${pad}[v${i}]`,
     )
     if (useAudio) {
       filters.push(
@@ -547,7 +556,7 @@ export async function renderHighlightCombine(input: {
   ]
 
   if (useAudio) {
-    args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '96k')
+    args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '192k')
   } else {
     args.push('-an')
   }
@@ -560,7 +569,9 @@ export async function renderHighlightCombine(input: {
     '-preset',
     'ultrafast',
     '-crf',
-    '28',
+    '23',
+    '-r',
+    String(fps),
     '-threads',
     '0',
     '-pix_fmt',

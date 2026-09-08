@@ -4,7 +4,6 @@ import path from 'path'
 import { promisify } from 'util'
 import ffmpegPath from 'ffmpeg-static'
 import ffprobePath from 'ffprobe-static'
-import { env } from '../config'
 
 const execFileAsync = promisify(execFile)
 
@@ -77,6 +76,40 @@ export async function probeDisplaySize(
     h = swap
   }
   return { w, h, portrait: h >= w }
+}
+
+/** Source frames per second (e.g. 29.97, 30, 60). */
+export async function probeFrameRate(filePath: string): Promise<number> {
+  const { stdout } = await execFileAsync(FFPROBE, [
+    '-v',
+    'error',
+    '-select_streams',
+    'v:0',
+    '-show_entries',
+    'stream=avg_frame_rate,r_frame_rate',
+    '-of',
+    'json',
+    filePath,
+  ])
+  const parsed = JSON.parse(stdout) as {
+    streams?: Array<{ avg_frame_rate?: string; r_frame_rate?: string }>
+  }
+  const stream = parsed.streams?.[0]
+  const parseRate = (raw?: string) => {
+    if (!raw || raw === '0/0') return 0
+    if (raw.includes('/')) {
+      const [a, b] = raw.split('/').map(Number)
+      if (b) return a / b
+    }
+    return Number(raw)
+  }
+  const rate = parseRate(stream?.avg_frame_rate) || parseRate(stream?.r_frame_rate)
+  return Number.isFinite(rate) && rate > 1 ? rate : 30
+}
+
+/** Client export: 1080p at 60 fps if the source is high-frame, otherwise 30. */
+export function exportFps(sourceFps: number): 30 | 60 {
+  return sourceFps >= 50 ? 60 : 30
 }
 
 export type SilenceSensitivity = 'light' | 'medium' | 'aggressive'
@@ -455,6 +488,10 @@ export type ClipMotion =
   | 'zoom-out'
   | 'ken-burns'
   | 'fade'
+  | 'slide-left'
+  | 'slide-right'
+  | 'blur'
+  | 'flash'
 
 export type SubjectFocus = { x: number; y: number }
 
@@ -571,13 +608,10 @@ function punchShotTypes(
   return cuts.map((_, i) => (i % 2 === 0 ? 'wide' : 'close'))
 }
 
-function targetFrame(
-  aspect: '9:16' | '1:1' | '16:9' | undefined,
-  fast: boolean,
-) {
-  if (aspect === '1:1') return fast ? { w: 720, h: 720 } : { w: 1080, h: 1080 }
-  if (aspect === '16:9') return fast ? { w: 1280, h: 720 } : { w: 1920, h: 1080 }
-  return fast ? { w: 720, h: 1280 } : { w: 1080, h: 1920 }
+function targetFrame(aspect: '9:16' | '1:1' | '16:9' | undefined) {
+  if (aspect === '1:1') return { w: 1080, h: 1080 }
+  if (aspect === '16:9') return { w: 1920, h: 1080 }
+  return { w: 1080, h: 1920 }
 }
 
 function cropAround(fx: number, fy: number) {
@@ -600,13 +634,16 @@ function motionScaleCrop(
   focus: SubjectFocus,
   shot: 'wide' | 'close',
   portrait: boolean,
+  extraZoom = 1,
 ) {
   const cover = `scale=${w}:${h}:force_original_aspect_ratio=increase:flags=fast_bilinear`
+  const zMul = Number.isFinite(extraZoom) && extraZoom > 0 ? extraZoom : 1
 
   const apply = (zoom: number, fx: number, fy: number) => {
     const crop = `crop=${w}:${h}:${cropAround(fx, fy)}`
-    if (zoom <= 1.01) return `${cover},${crop},setsar=1`
-    return `${cover},scale=iw*${zoom}:ih*${zoom}:flags=fast_bilinear,${crop},setsar=1`
+    const z = zoom * zMul
+    if (z <= 1.01) return `${cover},${crop},setsar=1`
+    return `${cover},scale=iw*${z}:ih*${z}:flags=fast_bilinear,${crop},setsar=1`
   }
 
   if (motion === 'none') return apply(1, 0.5, 0.5)
@@ -620,6 +657,22 @@ function motionScaleCrop(
       const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
       const base = apply(1, 0.5, 0.5)
       return index === 0 ? base : `${base},fade=t=in:st=0:d=${fade}`
+    }
+    if (motion === 'slide-left' || motion === 'slide-right') {
+      const d = Math.min(0.32, Math.max(0.16, duration * 0.28)).toFixed(2)
+      const x =
+        motion === 'slide-left'
+          ? `(iw-ow)*max(0\\,1-min(1\\,t/${d}))`
+          : `(iw-ow)*min(1\\,t/${d})`
+      return `${cover},scale=iw*1.08:ih*1.08:flags=fast_bilinear,crop=${w}:${h}:${x}:(ih-oh)/2,setsar=1`
+    }
+    if (motion === 'blur') {
+      const d = Math.min(0.32, Math.max(0.16, duration * 0.28)).toFixed(2)
+      return `${apply(1, 0.5, 0.5)},gblur=sigma='max(0.01\\,5*(1-min(1\\,t/${d})))'`
+    }
+    if (motion === 'flash') {
+      const d = Math.min(0.16, Math.max(0.1, duration * 0.2)).toFixed(2)
+      return `${apply(1, 0.5, 0.5)},fade=t=in:st=0:d=${d}:color=white`
     }
     return shot === 'wide' ? apply(1, 0.5, 0.5) : apply(1.04, 0.5, 0.46)
   }
@@ -643,6 +696,22 @@ function motionScaleCrop(
     const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
     const base = apply(1, scene.x, 0.5)
     return index === 0 ? base : `${base},fade=t=in:st=0:d=${fade}`
+  }
+  if (motion === 'slide-left' || motion === 'slide-right') {
+    const d = Math.min(0.32, Math.max(0.16, duration * 0.28)).toFixed(2)
+    const x =
+      motion === 'slide-left'
+        ? `(iw-ow)*max(0\\,1-min(1\\,t/${d}))`
+        : `(iw-ow)*min(1\\,t/${d})`
+    return `${cover},scale=iw*1.08:ih*1.08:flags=fast_bilinear,crop=${w}:${h}:${x}:(ih-oh)/2,setsar=1`
+  }
+  if (motion === 'blur') {
+    const d = Math.min(0.32, Math.max(0.16, duration * 0.28)).toFixed(2)
+    return `${apply(1, scene.x, 0.5)},gblur=sigma='max(0.01\\,5*(1-min(1\\,t/${d})))'`
+  }
+  if (motion === 'flash') {
+    const d = Math.min(0.16, Math.max(0.1, duration * 0.2)).toFixed(2)
+    return `${apply(1, scene.x, 0.5)},fade=t=in:st=0:d=${d}:color=white`
   }
   return apply(1, scene.x, 0.5)
 }
@@ -710,7 +779,7 @@ async function concatCopy(files: string[], outputPath: string) {
       '-preset',
       'ultrafast',
       '-crf',
-      '28',
+      '23',
       '-pix_fmt',
       'yuv420p',
       '-c:a',
@@ -737,6 +806,8 @@ async function renderSeekedBatch(input: {
   outputPath: string
   cuts: Array<{ start: number; end: number; speed: number }>
   motion: ClipMotion
+  perCutMotions?: ClipMotion[]
+  extraZoomByCut?: number[]
   indexOffset: number
   w: number
   h: number
@@ -777,9 +848,11 @@ async function renderSeekedBatch(input: {
     const globalIndex = input.indexOffset + i
     const focus = input.focuses[globalIndex] ?? { x: 0.5, y: 0.45 }
     const shot = input.shots[globalIndex] ?? (globalIndex % 2 === 0 ? 'wide' : 'close')
+    const cutMotion = input.perCutMotions?.[globalIndex] ?? input.motion
+    const extraZoom = input.extraZoomByCut?.[globalIndex] ?? 1
     const pts = spd === 1 ? 'setpts=PTS-STARTPTS' : `setpts=(PTS-STARTPTS)/${spd}`
     filters.push(
-      `[${i}:v]trim=start=${preroll}:duration=${trimDur},${pts},${fpsPrefix}${motionScaleCrop(globalIndex, playDur, input.motion, input.w, input.h, focus, shot, input.portrait)}[v${i}]`,
+      `[${i}:v]trim=start=${preroll}:duration=${trimDur},${pts},${fpsPrefix}${motionScaleCrop(globalIndex, playDur, cutMotion, input.w, input.h, focus, shot, input.portrait, extraZoom)}[v${i}]`,
     )
     if (input.useAudio) {
       const audio =
@@ -800,7 +873,7 @@ async function renderSeekedBatch(input: {
 
   args.push('-filter_complex', filterComplex, '-map', '[vout]')
   if (input.useAudio) {
-    args.push('-map', '[aout]', '-c:a', 'aac', '-ar', '44100', '-ac', '1', '-b:a', '96k')
+    args.push('-map', '[aout]', '-c:a', 'aac', '-ar', '44100', '-ac', '1', '-b:a', '192k')
   } else {
     args.push('-an')
   }
@@ -811,6 +884,8 @@ async function renderSeekedBatch(input: {
     'ultrafast',
     '-crf',
     input.crf,
+    '-r',
+    String(input.fps ?? 30),
     '-pix_fmt',
     'yuv420p',
     '-movflags',
@@ -838,6 +913,8 @@ export async function renderJumpCutVideo(input: {
   cuts: Array<{ start: number; end: number; speed?: number }>
   keepAudio: boolean
   motion?: ClipMotion
+  perCutMotions?: ClipMotion[]
+  extraZoomByCut?: number[]
   aspectRatio?: '9:16' | '1:1' | '16:9'
   onProgress?: (ratio: number) => void
 }): Promise<void> {
@@ -860,14 +937,14 @@ export async function renderJumpCutVideo(input: {
     return
   }
 
-  const sourceEnd = cuts[cuts.length - 1].end
   const keepSeconds = cuts.reduce((sum, c) => sum + (c.end - c.start) / c.speed, 0)
-  const longForm = sourceEnd > 90 || keepSeconds > 75
-  const { w, h } = targetFrame(input.aspectRatio, env.fastExport || longForm)
-  const fps = longForm ? 30 : null
-  const crf = env.fastExport || longForm ? '28' : '26'
+  const { w, h } = targetFrame(input.aspectRatio)
+  const sourceFps = await probeFrameRate(input.inputPath)
+  const fps = exportFps(sourceFps)
+  const crf = '23'
   const batchSize = 8
-  const applyMotion = motion !== 'none'
+  const applyMotion =
+    motion !== 'none' || Boolean(input.perCutMotions?.length) || Boolean(input.extraZoomByCut?.length)
   const display = await probeDisplaySize(input.inputPath)
   const portrait = display.portrait
   const focuses =
@@ -879,6 +956,8 @@ export async function renderJumpCutVideo(input: {
   const batchInput = {
     inputPath: input.inputPath,
     motion,
+    perCutMotions: input.perCutMotions,
+    extraZoomByCut: input.extraZoomByCut,
     w,
     h,
     fps,

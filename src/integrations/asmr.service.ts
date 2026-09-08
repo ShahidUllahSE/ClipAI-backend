@@ -10,6 +10,10 @@ import {
   silenceToKeepCuts,
 } from './ffmpeg'
 import {
+  extraZoomByCutFromTimeline,
+  perCutMotionsFromTimeline,
+} from './timeline-fx'
+import {
   assignSegmentSpeeds,
   totalOutputDuration,
   type SpeedCut,
@@ -123,6 +127,7 @@ export async function processAsmrUnboxing(input: {
   keepAudio: boolean
   speedRamp?: 'off' | 'light' | 'medium' | 'aggressive'
   durationSeconds?: number
+  timelineJson?: unknown
   onProgress?: (percent: number, note?: string) => void
 }): Promise<AsmrResult> {
   const notes: string[] = [
@@ -239,15 +244,25 @@ export async function processAsmrUnboxing(input: {
   }
 
   input.onProgress?.(76, 'Cutting and exporting')
+  const perCutMotions = perCutMotionsFromTimeline(input.timelineJson, cuts.length)
+  const extraZoomByCut = extraZoomByCutFromTimeline(input.timelineJson, cuts)
   await renderJumpCutVideo({
     inputPath: input.inputPath,
     outputPath: input.outputPath,
     cuts,
     keepAudio: input.keepAudio,
+    perCutMotions,
+    extraZoomByCut,
     onProgress: (ratio) =>
       input.onProgress?.(76 + ratio * 18, 'Cutting and exporting'),
   })
   input.onProgress?.(94, 'Finishing export')
+  if (perCutMotions?.length) {
+    notes.push(`Applied ${perCutMotions[0]} to every keep-segment`)
+  }
+  if (extraZoomByCut?.length) {
+    notes.push('Manual zoom keyframes baked into keep-segments')
+  }
 
   const outputDurationSeconds = totalOutputDuration(cuts)
   const removedSeconds = Math.max(0, duration - keep)

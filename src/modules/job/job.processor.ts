@@ -11,6 +11,7 @@ import {
 } from '../../integrations/export-polish.service'
 import { prepareExportCaptionsSrt } from '../../integrations/caption-transcribe.service'
 import { probeDuration, type ClipMotion } from '../../integrations/ffmpeg'
+import { hasZoomKeyframes } from '../../integrations/timeline-fx'
 import {
   planBeautifulCombine,
   renderHighlightCombine,
@@ -89,6 +90,7 @@ async function finalizeExport(input: {
   existingCaptionsPath?: string
   segmentSpeedApplied?: boolean
   durationSeconds: number
+  ignoreTimelineZoom?: boolean
 }): Promise<{ notes: string[]; durationSeconds: number; captionsPath?: string }> {
   const captionsPath = await prepareExportCaptionsSrt({
     enabled: input.options.captions,
@@ -156,6 +158,7 @@ async function finalizeExport(input: {
     captionsPath,
     segmentSpeedApplied: input.segmentSpeedApplied,
     durationSeconds: input.durationSeconds,
+    ignoreTimelineZoom: input.ignoreTimelineZoom,
   })
   return { ...polish, captionsPath }
 }
@@ -181,12 +184,14 @@ function clipMotionFromTimeline(timelineJson: unknown): ClipMotion {
     type === 'zoom-out' ||
     type === 'ken-burns' ||
     type === 'fade' ||
-    type === 'punch'
+    type === 'punch' ||
+    type === 'slide-left' ||
+    type === 'slide-right' ||
+    type === 'blur' ||
+    type === 'flash'
   ) {
     return type
   }
-  if (type === 'flash' || type === 'blur') return 'punch'
-  if (type === 'slide-left' || type === 'slide-right') return 'fade'
   return 'punch'
 }
 
@@ -457,6 +462,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         captionOptions: options,
         durationSeconds: project.durationSeconds,
         motion: clipMotionFromTimeline(options.timelineJson),
+        timelineJson: options.timelineJson,
         aspectRatio: options.aspectRatio,
         onProgress: writeProgress,
       })
@@ -543,6 +549,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
             existingCaptionsPath: result.captionsPath,
             segmentSpeedApplied: result.segmentSpeedApplied,
             durationSeconds: result.outputDurationSeconds,
+            ignoreTimelineZoom: hasZoomKeyframes(options.timelineJson),
           })
           polishNotes = finalized.notes
           polishDuration = finalized.durationSeconds
@@ -694,6 +701,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         keepAudio: options.keepAudio,
         speedRamp: options.speedRamp,
         durationSeconds: project.durationSeconds,
+        timelineJson: options.timelineJson,
         onProgress: writeProgress,
       })
 
@@ -726,6 +734,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
           captionLine: result.summary?.slice(0, 90),
           segmentSpeedApplied: result.segmentSpeedApplied,
           durationSeconds: result.outputDurationSeconds,
+          ignoreTimelineZoom: hasZoomKeyframes(options.timelineJson),
         })
         polishNotes = finalized.notes
         polishDuration = finalized.durationSeconds
