@@ -4,6 +4,7 @@ import { env } from '../../config'
 import type { ProjectStatus } from '../../constants/projects'
 import { processTalkingHead } from '../../integrations/talking-head.service'
 import { processAsmrUnboxing } from '../../integrations/asmr.service'
+import { processRapidCut } from '../../integrations/rapid-cut.service'
 import {
   applyExportPolish,
   burnTimedCaptions,
@@ -831,6 +832,196 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         status: 'Completed',
         at: new Date(),
         note: `ASMR via ${result.provider} + polish`,
+      })
+      await job.save()
+      return
+    }
+
+    // ——— Rapid-cut: energy peaks + FFmpeg jump-cut (same export stack) ———
+    if (project.mode === 'rapid-cut') {
+      await setStatus(
+        projectId,
+        jobId,
+        'Analyzing',
+        'Finding energetic peaks',
+      )
+
+      const upload = await UploadModel.findById(project.uploadId)
+      if (!upload?.storagePath || !fs.existsSync(upload.storagePath)) {
+        throw new Error(
+          'Source video is not on this server. Upload the file again from this site.',
+        )
+      }
+
+      const options = normalizeOptions(
+        project.options as unknown as ProjectOptionsDto,
+      )
+      const outputName = `${project._id.toString()}.mp4`
+      const outputPath = path.resolve(
+        process.cwd(),
+        env.UPLOAD_DIR,
+        'outputs',
+        outputName,
+      )
+      const cutPath = makeTempSibling(outputPath, 'cut')
+      const outputUrl = `${env.PUBLIC_API_URL}/uploads/outputs/${outputName}`
+
+      await setStatus(
+        projectId,
+        jobId,
+        'Preparing edit',
+        'Keeping high-energy moments',
+      )
+      await setStatus(
+        projectId,
+        jobId,
+        'Rendering',
+        'Cutting slow sections with FFmpeg',
+      )
+
+      const writeProgress = createProgressWriter(projectId)
+      const result = await processRapidCut({
+        inputPath: upload.storagePath,
+        outputPath: cutPath,
+        outputUrl,
+        originalFilename: project.originalFilename,
+        silenceSensitivity: options.silenceSensitivity,
+        pacing: options.pacing,
+        keepAudio: options.keepAudio,
+        speedRamp: options.speedRamp,
+        durationSeconds: project.durationSeconds,
+        motion: clipMotionFromTimeline(options.timelineJson),
+        timelineJson: options.timelineJson,
+        aspectRatio: options.aspectRatio,
+        onProgress: writeProgress,
+      })
+
+      await setStatus(
+        projectId,
+        jobId,
+        'Rendering',
+        options.captions
+          ? 'Adding captions to the export'
+          : 'Applying ClipAI studio polish',
+      )
+
+      const naming = await generateProjectName({
+        originalFilename: project.originalFilename,
+        mode: project.mode,
+        summary: result.summary,
+      })
+
+      let polishNotes: string[] = []
+      let polishDuration = result.outputDurationSeconds
+      let exportCaptionsPath: string | undefined
+
+      try {
+        const finalized = await finalizeExport({
+          projectId,
+          cutPath,
+          outputPath,
+          options,
+          title: naming.title,
+          captionLine: result.summary?.slice(0, 90),
+          segmentSpeedApplied: result.segmentSpeedApplied,
+          durationSeconds: result.outputDurationSeconds,
+          ignoreTimelineZoom: hasZoomKeyframes(options.timelineJson),
+        })
+        polishNotes = finalized.notes
+        polishDuration = finalized.durationSeconds
+        exportCaptionsPath = finalized.captionsPath
+
+        const outDur = await probeDuration(outputPath).catch(() => 0)
+        if (!outDur || outDur < 0.4) {
+          fs.copyFileSync(cutPath, outputPath)
+          polishNotes.push(
+            'Polish output unreadable — delivered rapid-cut instead',
+          )
+          polishDuration = result.outputDurationSeconds
+        }
+      } catch (polishError) {
+        fs.copyFileSync(cutPath, outputPath)
+        polishNotes = [
+          `Polish failed — delivered rapid-cut: ${
+            polishError instanceof Error
+              ? polishError.message.slice(0, 140)
+              : 'unknown'
+          }`,
+        ]
+        polishDuration = result.outputDurationSeconds
+      }
+
+      unlinkQuiet(cutPath)
+      unlinkQuiet(exportCaptionsPath)
+
+      const allNotes = [...result.notes, ...polishNotes]
+      const polish = { notes: polishNotes, durationSeconds: polishDuration }
+
+      const deliveryUrl = await publishOutputUrl(
+        outputPath,
+        projectId,
+        outputUrl,
+        allNotes,
+      )
+
+      job.understandingResult = {
+        provider: result.provider,
+        summary: result.summary,
+        category: result.category,
+        moments: result.cuts.map((c, i) => ({
+          start: c.start,
+          end: c.end,
+          label: `Rapid-cut moment ${i + 1}`,
+          score: 1,
+        })),
+      }
+      job.namingResult = naming
+      job.renderResult = {
+        provider: 'ffmpeg+clipai-polish',
+        outputUrl: deliveryUrl,
+        status: 'done',
+        message: allNotes.join(' | '),
+      }
+      await job.save()
+
+      project.analysis = {
+        understanding: job.understandingResult,
+        notes: allNotes,
+        removedSeconds: result.removedSeconds,
+        outputDurationSeconds: polish.durationSeconds,
+      }
+      project.editPlan = {
+        cuts: result.cuts,
+        captions: options.captions,
+        aspectRatio: options.aspectRatio,
+        keepAudio: options.keepAudio,
+        notes: allNotes,
+      }
+      project.generatedTitle = naming.title
+      project.title = naming.title
+      project.outputFilename = naming.outputFilename
+      if (result.durationSeconds > 0) {
+        project.durationSeconds = result.durationSeconds
+      }
+
+      if (!project.creditCharged) {
+        await userService.useEditCredit(project.userId.toString())
+        project.creditCharged = true
+      }
+
+      project.outputUrl = deliveryUrl
+      project.status = 'Completed'
+      project.progressPercent = 100
+      project.progressNote = 'Done'
+      project.errorMessage = ''
+      await project.save()
+
+      job.status = 'Completed'
+      job.finishedAt = new Date()
+      job.steps.push({
+        status: 'Completed',
+        at: new Date(),
+        note: `Rapid-cut via ${result.provider} + polish`,
       })
       await job.save()
       return
