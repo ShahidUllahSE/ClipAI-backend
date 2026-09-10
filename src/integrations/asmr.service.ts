@@ -78,6 +78,63 @@ function totalKeep(cuts: Array<{ start: number; end: number }>) {
   return cuts.reduce((sum, c) => sum + Math.max(0, c.end - c.start), 0)
 }
 
+/** A keep-clip is included only if it contains at least this much real sound. */
+const MIN_SOUND_SECONDS = 0.55
+
+function overlapSeconds(
+  cut: { start: number; end: number },
+  range: { start: number; end: number },
+) {
+  const start = Math.max(cut.start, range.start)
+  const end = Math.min(cut.end, range.end)
+  return Math.max(0, end - start)
+}
+
+function soundSecondsInCut(
+  cut: { start: number; end: number },
+  silenceRanges: Array<{ start: number; end: number }>,
+) {
+  const silent = silenceRanges.reduce(
+    (sum, range) => sum + overlapSeconds(cut, range),
+    0,
+  )
+  return Math.max(0, cut.end - cut.start - silent)
+}
+
+function trimSilentEdges(
+  cut: { start: number; end: number },
+  silenceRanges: Array<{ start: number; end: number }>,
+): { start: number; end: number } | null {
+  let start = cut.start
+  let end = cut.end
+  for (const range of silenceRanges) {
+    if (range.start <= start + 0.08 && range.end > start) {
+      start = Math.max(start, range.end)
+    }
+    if (range.end >= end - 0.08 && range.start < end) {
+      end = Math.min(end, range.start)
+    }
+  }
+  if (end - start < 0.2) return null
+  return { start, end }
+}
+
+function keepClipsWithMinSound(
+  cuts: Array<{ start: number; end: number }>,
+  silenceRanges: Array<{ start: number; end: number }>,
+  minSound: number,
+) {
+  const trimmed = cuts
+    .map((cut) => trimSilentEdges(cut, silenceRanges))
+    .filter((cut): cut is { start: number; end: number } => Boolean(cut))
+  const withSound = trimmed.filter(
+    (cut) => soundSecondsInCut(cut, silenceRanges) >= minSound,
+  )
+  if (withSound.length) return withSound
+  if (trimmed.length) return trimmed
+  return cuts
+}
+
 async function geminiProductHint(input: {
   filename: string
   durationSeconds: number
@@ -150,7 +207,7 @@ export async function processAsmrUnboxing(input: {
   const silenceRanges = await detectSilenceRanges(input.inputPath, level)
   notes.push(`Quiet waits detected: ${silenceRanges.length} (level ${level})`)
 
-  let baseCuts = silenceToKeepCuts(silenceRanges, duration, 0.15)
+  let baseCuts = silenceToKeepCuts(silenceRanges, duration, MIN_SOUND_SECONDS)
   let keep = totalKeep(baseCuts)
   let method = 'silence-cuts'
 
@@ -172,7 +229,18 @@ export async function processAsmrUnboxing(input: {
   }
 
   baseCuts = pacingTrim(baseCuts, input.pacing)
+  const beforeSoundGate = baseCuts.length
+  baseCuts = keepClipsWithMinSound(
+    baseCuts,
+    silenceRanges,
+    MIN_SOUND_SECONDS,
+  )
   keep = totalKeep(baseCuts)
+  if (baseCuts.length !== beforeSoundGate) {
+    notes.push(
+      `Kept clips with at least ${MIN_SOUND_SECONDS}s of sound (${baseCuts.length} clips)`,
+    )
+  }
 
   const minKeep = minimumKeepSeconds(duration)
   if (duration >= 15 && keep < minKeep) {
@@ -196,6 +264,13 @@ export async function processAsmrUnboxing(input: {
       'Could not safely trim waits without over-cutting — returned fuller clip',
     )
   }
+
+  baseCuts = keepClipsWithMinSound(
+    baseCuts,
+    silenceRanges,
+    MIN_SOUND_SECONDS,
+  )
+  keep = totalKeep(baseCuts)
 
   notes.push(
     `Keeping ${baseCuts.length} segments via ${method} (${input.pacing} pacing)`,
