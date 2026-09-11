@@ -42,9 +42,10 @@ function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
 export const projectService = {
   async list(userId: string): Promise<{ projects: PublicProject[] }> {
     const projects = await ProjectModel.find({ userId })
+      .select('-analysis -editPlan')
       .sort({ createdAt: -1 })
       .lean()
-    return { projects: projects.map((p) => toPublicProject(p)) }
+    return { projects: projects.map((p) => toPublicProject(p, { slim: true })) }
   },
 
   async get(id: string, userId: string): Promise<{ project: PublicProject }> {

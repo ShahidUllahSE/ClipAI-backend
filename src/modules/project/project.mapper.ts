@@ -51,7 +51,10 @@ export function suggestFilename(title: string) {
   return `${slugify(title) || 'export'}.mp4`
 }
 
-export function toPublicProject(project: ProjectLike): PublicProject {
+export function toPublicProject(
+  project: ProjectLike,
+  opts?: { slim?: boolean },
+): PublicProject {
   const isDone = project.status === 'Completed' && project.outputUrl
   const previewUrl = isDone ? project.outputUrl : project.sourceUrl || project.outputUrl
   return {
@@ -79,8 +82,8 @@ export function toPublicProject(project: ProjectLike): PublicProject {
     progressNote: project.progressNote || undefined,
     previewUrl,
     outputUrl: project.outputUrl || undefined,
-    analysis: project.analysis ?? undefined,
-    editPlan: project.editPlan ?? undefined,
+    analysis: opts?.slim ? undefined : project.analysis ?? undefined,
+    editPlan: opts?.slim ? undefined : project.editPlan ?? undefined,
     secondaryUploadId: project.secondaryUploadId
       ? project.secondaryUploadId.toString()
       : null,

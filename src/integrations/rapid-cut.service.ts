@@ -5,6 +5,7 @@ import { extractJsonObject, geminiGenerateText } from './gemini'
 import type { ClipMotion, SilenceSensitivity } from './ffmpeg'
 import {
   detectLoudKeepCuts,
+  detectSilenceInRange,
   detectSilenceRanges,
   probeDuration,
   probeHasAudio,
@@ -21,10 +22,13 @@ import {
   compactWordTimings,
   cutsFromPhrases,
   mergeSpokenPhrases,
+  remapWordsToOutput,
   snapCutsToCompleteWords,
   splitCutsBySilence,
   totalOutputDuration,
+  wordsToCaptionCues,
   wordsToSentenceCues,
+  writeSrtFile,
   type CaptionCue,
   type SpeedCut,
   type TimedWord,
@@ -43,6 +47,7 @@ export interface RapidCutResult {
   outputPath: string
   outputUrl: string
   notes: string[]
+  captionsPath?: string
 }
 
 type Pacing = 'normal' | 'fast' | 'very-fast'
@@ -147,7 +152,7 @@ const HANGING_LAST = new Set([
 ])
 
 const LEFTOVER_OPEN =
-  /^(yeah|yep|yup|okay|ok|so|well|right|like|actually|basically|um|uh)\b/i
+  /^(yeah|yep|yup|okay|ok|so|well|right|like|actually|basically|um|uh|let'?s|look|wait|sorry)\b/i
 
 function wordsInCut(
   cut: { start: number; end: number },
@@ -292,6 +297,7 @@ function isLeftoverAside(
   const text = cutText(cut, words)
   const tokens = text.split(/\s+/).filter(Boolean)
   if (!tokens.length || isFillerPhrase(text)) return true
+  if (tokens.length <= 3) return true
   return LEFTOVER_OPEN.test(text) && tokens.length <= 12
 }
 
@@ -337,6 +343,281 @@ function dropIncompleteOrphans(
   return kept.length >= 2 ? kept : cuts
 }
 
+const TAKE_NOISE =
+  /\b(um+|uh+|like|you know|so|yeah|okay|ok|actually|basically)\b/gi
+
+function normalizeTakeText(text: string) {
+  return text
+    .toLowerCase()
+    .replace(TAKE_NOISE, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function takeTokens(text: string) {
+  return normalizeTakeText(text)
+    .split(' ')
+    .filter((word) => word.length > 2)
+}
+
+function similarTakes(a: string, b: string) {
+  const ta = takeTokens(a)
+  const tb = takeTokens(b)
+  if (ta.length < 4 || tb.length < 4) return false
+  const sa = new Set(ta)
+  const sb = new Set(tb)
+  let inter = 0
+  for (const word of sa) {
+    if (sb.has(word)) inter += 1
+  }
+  const union = sa.size + sb.size - inter
+  const jaccard = union > 0 ? inter / union : 0
+  const na = normalizeTakeText(a)
+  const nb = normalizeTakeText(b)
+  const contained =
+    Math.min(ta.length, tb.length) >= 5 &&
+    (na.includes(nb) || nb.includes(na))
+  return jaccard >= 0.55 || contained
+}
+
+/**
+ * One keep-clip sometimes contains a flub + the redo. Keep the later half.
+ */
+function trimDoubledTakeCuts(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+  durationSeconds: number,
+) {
+  return cuts.map((cut) => {
+    const inside = [...wordsInCut(cut, words)].sort((a, b) => a.start - b.start)
+    if (inside.length < 10 || cut.end - cut.start < 6) return cut
+    const midCount = Math.floor(inside.length / 2)
+    const first = inside
+      .slice(0, midCount)
+      .map((word) => word.word)
+      .join(' ')
+    const second = inside
+      .slice(midCount)
+      .map((word) => word.word)
+      .join(' ')
+    if (!similarTakes(first, second)) return cut
+    const later = inside.slice(midCount)
+    const start = Math.max(0, later[0].start - 0.04)
+    const end = Math.min(
+      durationSeconds,
+      later[later.length - 1].end + 0.06,
+    )
+    return end - start >= 0.8 ? { start, end } : cut
+  })
+}
+
+/**
+ * Creator retakes (same line / same CTA). Keep the later take, drop the earlier.
+ */
+function dropRepeatedTakes(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+) {
+  if (cuts.length < 2) return cuts
+  const sorted = [...cuts].sort((a, b) => a.start - b.start)
+  const keep = sorted.map(() => true)
+  for (let later = sorted.length - 1; later >= 1; later -= 1) {
+    if (!keep[later]) continue
+    const laterText = cutText(sorted[later], words)
+    if (takeTokens(laterText).length < 4) continue
+    for (let earlier = 0; earlier < later; earlier += 1) {
+      if (!keep[earlier]) continue
+      if (similarTakes(cutText(sorted[earlier], words), laterText)) {
+        keep[earlier] = false
+      }
+    }
+  }
+  const out = sorted.filter((_, index) => keep[index])
+  return out.length >= 1 ? out : cuts
+}
+
+/**
+ * A keep-clip often contains the good take + redo with ~0.5s pauses.
+ * Whisper writes one sentence, so text matching misses it. Split on real
+ * audio pauses and keep the first complete take only.
+ */
+function compactRapidCutWords(words: TimedWord[]): TimedWord[] {
+  const base = compactWordTimings(words)
+  return base.map((word, i) => {
+    const next = base[i + 1]
+    const letters = word.word.replace(/[^A-Za-z0-9]/g, '').length
+    const expected = Math.min(0.65, Math.max(0.12, letters * 0.08 + 0.08))
+    let { start, end } = word
+    const dur = Math.max(0, end - start)
+    if (dur > Math.max(0.8, expected * 2.6)) {
+      end = start + expected + 0.22
+    }
+    if (next) {
+      end = Math.min(end, Math.max(start + 0.08, next.start - 0.02))
+    }
+    return { ...word, start, end: Math.max(start + 0.08, end) }
+  })
+}
+
+function pickFirstCompleteTake(
+  cut: { start: number; end: number },
+  parts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+) {
+  if (parts.length <= 1) return { ...cut }
+  const firstComplete = parts.find((part) => {
+    const text = cutText(part, words)
+    return takeTokens(text).length >= 6 && thoughtLooksComplete(text)
+  })
+  return firstComplete ?? parts[0]
+}
+
+function clampCutsToSpokenWords(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+  durationSeconds: number,
+) {
+  return cuts.map((cut) => {
+    const inside = [...wordsInCut(cut, words)].sort((a, b) => a.start - b.start)
+    if (inside.length < 2) return { ...cut }
+    const start = Math.max(0, inside[0].start - 0.04)
+    const end = Math.min(durationSeconds, inside[inside.length - 1].end + 0.08)
+    if (end - start < 0.22) return { ...cut }
+    return { start, end }
+  })
+}
+
+function mergeOverlappingCuts(cuts: Array<{ start: number; end: number }>) {
+  const sorted = [...cuts].sort((a, b) => a.start - b.start)
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of sorted) {
+    const prev = out[out.length - 1]
+    if (prev && cut.start <= prev.end + 0.12) {
+      prev.end = Math.max(prev.end, cut.end)
+      continue
+    }
+    out.push({ ...cut })
+  }
+  return out.length ? out : cuts
+}
+
+function clipCutsToHardEnd(
+  cuts: Array<{ start: number; end: number }>,
+  hardEnd: number,
+) {
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
+    if (cut.start >= hardEnd - 0.05) continue
+    const end = Math.min(cut.end, hardEnd)
+    if (end - cut.start >= 0.22) out.push({ start: cut.start, end })
+  }
+  return out.length ? out : cuts
+}
+
+/**
+ * Closing CTA is often filmed twice. Keep the first complete closing
+ * sentence in the last 25s of the source; drop the retake after it.
+ */
+async function dropClosingRetake(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+  durationSeconds: number,
+  inputPath: string,
+) {
+  if (!cuts.length || words.length < 6) return cuts
+  const closeStart = Math.max(0, durationSeconds - 25)
+  const sentences = mergeSpokenPhrases(wordsToSentenceCues(words)).filter(
+    (sentence) =>
+      sentence.start >= closeStart - 0.4 &&
+      takeTokens(sentence.text).length >= 5 &&
+      thoughtLooksComplete(sentence.text),
+  )
+  if (!sentences.length) return cuts
+
+  const keep = sentences.map(() => true)
+  for (let later = 1; later < sentences.length; later += 1) {
+    for (let earlier = 0; earlier < later; earlier += 1) {
+      if (!keep[earlier]) continue
+      if (similarTakes(sentences[earlier].text, sentences[later].text)) {
+        keep[later] = false
+        break
+      }
+    }
+  }
+
+  const kept = sentences.filter((_, index) => keep[index])
+  let hardEnd = Math.max(...kept.map((sentence) => sentence.end)) + 0.1
+  const firstRepeated = sentences.find((sentence, index) =>
+    sentences.some(
+      (other, later) =>
+        later > index &&
+        !keep[later] &&
+        similarTakes(sentence.text, other.text),
+    ),
+  )
+  if (firstRepeated) hardEnd = Math.min(hardEnd, firstRepeated.end + 0.1)
+
+  const longClose = kept[kept.length - 1]
+  if (longClose && longClose.end - longClose.start >= 5.5) {
+    try {
+      const holes = await detectSilenceInRange(
+        inputPath,
+        longClose.start,
+        longClose.end,
+      )
+      const parts = splitCutsBySilence(
+        [{ start: longClose.start, end: longClose.end }],
+        holes,
+        0.28,
+      )
+      const first = pickFirstCompleteTake(
+        { start: longClose.start, end: longClose.end },
+        parts,
+        words,
+      )
+      if (first.end <= longClose.end - 0.4) {
+        hardEnd = Math.min(hardEnd, first.end + 0.08)
+      }
+    } catch {
+      /* keep sentence end */
+    }
+  }
+
+  return clipCutsToHardEnd(cuts, hardEnd)
+}
+
+function dedupeCaptionCues(cues: CaptionCue[]) {
+  const out: CaptionCue[] = []
+  for (const cue of cues) {
+    const prev = out[out.length - 1]
+    if (prev && similarTakes(prev.text, cue.text)) continue
+    if (prev && normalizeTakeText(prev.text) === normalizeTakeText(cue.text)) {
+      continue
+    }
+    out.push(cue)
+  }
+  return out
+}
+
+function trimRepeatedWordStutter(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+  durationSeconds: number,
+) {
+  return cuts.map((cut) => {
+    const inside = [...wordsInCut(cut, words)].sort((a, b) => a.start - b.start)
+    for (let i = 1; i < inside.length; i++) {
+      const prev = inside[i - 1].word.replace(/[^A-Za-z]/g, '').toLowerCase()
+      const cur = inside[i].word.replace(/[^A-Za-z]/g, '').toLowerCase()
+      if (prev.length < 5 || prev !== cur) continue
+      const end = Math.min(durationSeconds, inside[i - 1].end + 0.08)
+      if (end - cut.start >= 0.8) return { start: cut.start, end }
+    }
+    return cut
+  })
+}
+
 /**
  * Rapid-cut transcript keeps: complete spoken thoughts minus leftover talk.
  */
@@ -345,7 +626,7 @@ function transcriptKeepCuts(
   phrases: CaptionCue[],
   durationSeconds: number,
 ) {
-  const compact = compactWordTimings(words)
+  const compact = compactRapidCutWords(words)
   const spoken = compact.length
     ? mergeSpokenPhrases(wordsToSentenceCues(compact))
     : mergeSpokenPhrases(phrases)
@@ -488,7 +769,7 @@ export async function processRapidCut(input: {
         duration,
         tempDir,
       )
-      const compact = compactWordTimings(stt.words)
+      const compact = compactRapidCutWords(stt.words)
       const spokenSpan = compact.reduce(
         (sum, word) => sum + Math.max(0, word.end - word.start),
         0,
@@ -498,18 +779,28 @@ export async function processRapidCut(input: {
       if (speechHeavy) {
         let spokenCuts = transcriptKeepCuts(stt.words, stt.phrases, duration)
         if (spokenCuts.length >= 2) {
+          let punchHoles = silenceRanges
+          try {
+            const tightHoles = await detectSilenceRanges(
+              input.inputPath,
+              'aggressive',
+            )
+            punchHoles = [...silenceRanges, ...tightHoles]
+          } catch {
+            punchHoles = silenceRanges
+          }
           spokenCuts = punchSilentHolds(
             spokenCuts,
             compact,
             duration,
-            silenceRanges,
+            punchHoles,
           )
           spokenCuts = mergeNearbyIncompleteCuts(spokenCuts, compact)
           spokenCuts = punchSilentHolds(
             spokenCuts,
             compact,
             duration,
-            silenceRanges,
+            punchHoles,
           )
           const beforeDrop = spokenCuts.length
           spokenCuts = dropLeftoverSentences(
@@ -522,9 +813,30 @@ export async function processRapidCut(input: {
             spokenCuts,
             compact,
             duration,
-            silenceRanges,
+            punchHoles,
           )
           if (spokenCuts.length >= 2) {
+            const leftoverClean = spokenCuts
+            spokenCuts = trimRepeatedWordStutter(
+              spokenCuts,
+              compact,
+              duration,
+            )
+            spokenCuts = dropRepeatedTakes(spokenCuts, compact)
+            if (spokenCuts.length < 2) spokenCuts = leftoverClean
+            spokenCuts = clampCutsToSpokenWords(
+              spokenCuts,
+              compact,
+              duration,
+            )
+            spokenCuts = await dropClosingRetake(
+              spokenCuts,
+              compact,
+              duration,
+              input.inputPath,
+            )
+            spokenCuts = mergeOverlappingCuts(spokenCuts)
+            if (spokenCuts.length < 2) spokenCuts = leftoverClean
             baseCuts = spokenCuts
             keep = totalKeep(baseCuts)
             method = 'transcript-cuts'
@@ -533,6 +845,11 @@ export async function processRapidCut(input: {
             transcriptWords = compact
             notes.push(
               `Cut leftover speech from transcript (${compact.length} words, ${beforeDrop} thoughts → ${spokenCuts.length} complete sentences)`,
+            )
+            notes.push(
+              `Keep ${spokenCuts
+                .map((cut) => `${cut.start.toFixed(1)}-${cut.end.toFixed(1)}`)
+                .join(', ')}`,
             )
           }
         }
@@ -555,6 +872,18 @@ export async function processRapidCut(input: {
         duration,
       )
       if (trimmed.length >= 2) baseCuts = trimmed
+      baseCuts = clampCutsToSpokenWords(
+        baseCuts,
+        transcriptWords,
+        duration,
+      )
+      baseCuts = await dropClosingRetake(
+        baseCuts,
+        transcriptWords,
+        duration,
+        input.inputPath,
+      )
+      baseCuts = mergeOverlappingCuts(baseCuts)
     }
   } else {
     baseCuts = dropTinyCuts(baseCuts)
@@ -649,6 +978,19 @@ export async function processRapidCut(input: {
     notes.push('Manual zoom keyframes baked into keep-segments')
   }
 
+  let captionsPath: string | undefined
+  if (usedTranscript && transcriptWords.length) {
+    const remapped = remapWordsToOutput(transcriptWords, cuts)
+    const cues = dedupeCaptionCues(wordsToCaptionCues(remapped, 5, 2.4))
+    if (cues.length) {
+      captionsPath = input.outputPath.replace(/\.mp4$/i, '.captions.srt')
+      writeSrtFile(cues, captionsPath)
+      notes.push(
+        `Captions from source transcript (${cues.length} cues, repeats removed)`,
+      )
+    }
+  }
+
   const outputDurationSeconds = totalOutputDuration(cuts)
   const removedSeconds = Math.max(0, duration - keep)
   notes.push(
@@ -668,5 +1010,6 @@ export async function processRapidCut(input: {
     outputPath: input.outputPath,
     outputUrl: input.outputUrl,
     notes,
+    captionsPath,
   }
 }

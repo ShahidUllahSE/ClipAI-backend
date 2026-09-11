@@ -224,6 +224,53 @@ export async function detectSilenceRanges(
   return detectSilenceWithFilter(filePath, silenceFilter(level))
 }
 
+/** Silence inside one keep-clip, mapped back to the source timeline. */
+export async function detectSilenceInRange(
+  filePath: string,
+  start: number,
+  end: number,
+): Promise<Array<{ start: number; end: number }>> {
+  const dur = Math.max(0.25, end - start)
+  const args = [
+    '-hide_banner',
+    '-nostats',
+    '-ss',
+    start.toFixed(3),
+    '-t',
+    dur.toFixed(3),
+    '-i',
+    filePath,
+    '-vn',
+    '-sn',
+    '-map',
+    '0:a:0',
+    '-af',
+    'silencedetect=noise=-25dB:d=0.32',
+    '-f',
+    'null',
+    '-',
+  ]
+  try {
+    const { stderr } = await execFileAsync(FFMPEG, args, {
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 5 * 60 * 1000,
+    })
+    return parseSilenceLog(stderr).map((range) => ({
+      start: range.start + start,
+      end: range.end + start,
+    }))
+  } catch (error) {
+    const stderr =
+      error && typeof error === 'object' && 'stderr' in error
+        ? String((error as { stderr: string }).stderr)
+        : ''
+    return parseSilenceLog(stderr).map((range) => ({
+      start: range.start + start,
+      end: range.end + start,
+    }))
+  }
+}
+
 /** Dead-air pauses inside talking-head speech, without treating quiet speech as silence. */
 export async function detectTalkingHeadPauses(
   filePath: string,

@@ -923,6 +923,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
           options,
           title: naming.title,
           captionLine: result.summary?.slice(0, 90),
+          existingCaptionsPath: result.captionsPath,
           segmentSpeedApplied: result.segmentSpeedApplied,
           durationSeconds: result.outputDurationSeconds,
           ignoreTimelineZoom: hasZoomKeyframes(options.timelineJson),
@@ -952,6 +953,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       }
 
       unlinkQuiet(cutPath)
+      unlinkQuiet(result.captionsPath)
       unlinkQuiet(exportCaptionsPath)
 
       const allNotes = [...result.notes, ...polishNotes]
