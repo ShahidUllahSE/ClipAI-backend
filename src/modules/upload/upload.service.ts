@@ -246,7 +246,7 @@ export const uploadService = {
         userId,
       })
       if (upload && localFileExists(upload.storagePath)) {
-        return {
+    return {
           session: publicSession(completed),
           upload: publicUpload(upload),
         }
