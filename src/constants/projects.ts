@@ -58,4 +58,5 @@ export const UPLOAD_LIMITS = {
   maxBytes: 2 * 1024 * 1024 * 1024,
   maxDurationSeconds: 20 * 60,
   acceptMime: ['video/mp4', 'video/quicktime', 'video/webm'],
+  chunkSizeBytes: 8 * 1024 * 1024,
 } as const
