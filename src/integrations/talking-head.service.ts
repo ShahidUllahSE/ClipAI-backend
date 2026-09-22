@@ -46,6 +46,45 @@ function gapThreshold(level: SilenceSensitivity) {
   }
 }
 
+const WORD_PADDING_SECONDS = 0.12
+
+export function silenceRangesFromWords(
+  words: Array<{ word: string; start: number; end: number }>,
+  durationSeconds: number,
+  level: SilenceSensitivity,
+): Array<{ start: number; end: number }> {
+  if (!words.length) return []
+
+  const minGap = gapThreshold(level)
+  const silenceRanges: Array<{ start: number; end: number }> = []
+  const firstStart = Math.max(0, words[0].start - WORD_PADDING_SECONDS)
+
+  if (firstStart > 0.25) {
+    silenceRanges.push({ start: 0, end: firstStart })
+  }
+
+  for (let i = 1; i < words.length; i += 1) {
+    const previousEnd = Math.min(
+      durationSeconds,
+      words[i - 1].end + WORD_PADDING_SECONDS,
+    )
+    const nextStart = Math.max(0, words[i].start - WORD_PADDING_SECONDS)
+    if (nextStart - previousEnd >= minGap) {
+      silenceRanges.push({ start: previousEnd, end: nextStart })
+    }
+  }
+
+  const lastEnd = Math.min(
+    durationSeconds,
+    words[words.length - 1].end + WORD_PADDING_SECONDS,
+  )
+  if (durationSeconds - lastEnd > 0.25) {
+    silenceRanges.push({ start: lastEnd, end: durationSeconds })
+  }
+
+  return silenceRanges
+}
+
 /** Build keep-cuts from word timestamps (true talking-head jump cuts). */
 export function cutsFromWords(
   words: Array<{ word: string; start: number; end: number }>,
@@ -53,23 +92,7 @@ export function cutsFromWords(
   level: SilenceSensitivity,
 ): Array<{ start: number; end: number }> {
   if (!words.length) return []
-  const minGap = gapThreshold(level)
-  const silenceRanges: Array<{ start: number; end: number }> = []
-
-  if (words[0].start > 0.25) {
-    silenceRanges.push({ start: 0, end: words[0].start })
-  }
-  for (let i = 1; i < words.length; i++) {
-    const gap = words[i].start - words[i - 1].end
-    if (gap >= minGap) {
-      silenceRanges.push({ start: words[i - 1].end, end: words[i].start })
-    }
-  }
-  const last = words[words.length - 1]
-  if (durationSeconds - last.end > 0.25) {
-    silenceRanges.push({ start: last.end, end: durationSeconds })
-  }
-
+  const silenceRanges = silenceRangesFromWords(words, durationSeconds, level)
   return silenceToKeepCuts(silenceRanges, durationSeconds, 0.15)
 }
 
@@ -167,6 +190,7 @@ export async function processTalkingHead(input: {
   let provider: TalkingHeadResult['provider'] = 'ffmpeg'
   let silenceRanges: Array<{ start: number; end: number }> = []
   let baseCuts: Array<{ start: number; end: number }> = []
+  let transcriptAttempted = false
 
   const tempDir = path.join(path.dirname(input.outputPath), '.tmp')
   fs.mkdirSync(tempDir, { recursive: true })
@@ -174,6 +198,7 @@ export async function processTalkingHead(input: {
 
   try {
     if (env.GROQ_API_KEY) {
+      transcriptAttempted = true
       await extractAudioWav(input.inputPath, wavPath)
       const stt = await transcribeWithGroq(wavPath)
       transcript = stt.transcript
@@ -181,11 +206,19 @@ export async function processTalkingHead(input: {
       provider = 'ffmpeg+groq'
       notes.push('Transcript + word timings from Groq Whisper')
 
-      baseCuts = cutsFromWords(words, duration, input.silenceSensitivity)
-      if (baseCuts.length) {
+      if (words.length > 0) {
+        silenceRanges = silenceRangesFromWords(
+          words,
+          duration,
+          input.silenceSensitivity,
+        )
+        baseCuts = cutsFromWords(words, duration, input.silenceSensitivity)
         notes.push(
           `Jump cuts from speech gaps (${input.silenceSensitivity}): ${baseCuts.length} keep-segments`,
         )
+      } else {
+        notes.push('Groq returned no word timestamps — keeping the full video')
+        baseCuts = [{ start: 0, end: duration }]
       }
     } else {
       notes.push('No GROQ_API_KEY — using FFmpeg silence detection only')
@@ -198,13 +231,16 @@ export async function processTalkingHead(input: {
     if (fs.existsSync(wavPath)) fs.unlinkSync(wavPath)
   }
 
-  if (!baseCuts.length) {
+  if (!baseCuts.length && !transcriptAttempted) {
     const level =
       input.silenceSensitivity === 'light' ? 'medium' : input.silenceSensitivity
     silenceRanges = await detectSilenceRanges(input.inputPath, level)
     notes.push(`FFmpeg silence ranges: ${silenceRanges.length}`)
     baseCuts = silenceToKeepCuts(silenceRanges, duration, 0.15)
     notes.push(`Keep-segments from silence: ${baseCuts.length}`)
+  } else if (!baseCuts.length && transcriptAttempted) {
+    notes.push('Transcript unavailable — keeping the full video instead of guessing cuts')
+    baseCuts = [{ start: 0, end: duration }]
   }
 
   let keepSeconds = totalKeepSeconds(baseCuts)
