@@ -245,6 +245,14 @@ export async function extractAudioWav(
 /**
  * Cut keep-segments from a video and concatenate into one MP4.
  * Optional per-segment `speed` (>1 = faster) for SOW speed-ramp.
+ *
+ * Each segment is decoded and re-encoded independently (seeking near its own
+ * start point), then joined with a stream-copy concat. A single filter_complex
+ * with N `trim` branches feeding one `concat` was tried first, but ffmpeg fans
+ * the full decoded stream out to every branch at once while concat drains them
+ * one at a time — for cuts spread across a long source this buffers whole
+ * unconsumed branches in memory and fails with "Cannot allocate memory" on
+ * real-world footage (e.g. 9 cuts across ~95s of 1080p60 HEVC).
  */
 export async function renderJumpCutVideo(input: {
   inputPath: string
@@ -278,59 +286,72 @@ export async function renderJumpCutVideo(input: {
   }
 
   const limited = cuts.slice(0, env.fastExport ? 18 : 28)
-  const filters: string[] = []
-  const concatInputs: string[] = []
+  const crf = env.fastExport ? '28' : '26'
 
-  limited.forEach((cut, i) => {
-    const spd = cut.speed
-    filters.push(
-      `[0:v]trim=start=${cut.start}:end=${cut.end},setpts=(PTS-STARTPTS)/${spd}[v${i}]`,
-    )
-    if (useAudio) {
-      // atempo supports 0.5–2.0; our speeds stay in range
-      filters.push(
-        `[0:a]atrim=start=${cut.start}:end=${cut.end},asetpts=PTS-STARTPTS,atempo=${spd.toFixed(3)}[a${i}]`,
-      )
-      concatInputs.push(`[v${i}][a${i}]`)
-    } else {
-      concatInputs.push(`[v${i}]`)
-    }
-  })
-
-  const n = limited.length
-  const scaleOut = env.fastExport
-    ? `;[vout]scale=-2:720:flags=fast_bilinear[vout2]`
-    : ''
-  const vOut = env.fastExport ? '[vout2]' : '[vout]'
-  const filterComplex = useAudio
-    ? `${filters.join(';')};${concatInputs.join('')}concat=n=${n}:v=1:a=1[vout][aout]${scaleOut}`
-    : `${filters.join(';')};${concatInputs.join('')}concat=n=${n}:v=1:a=0[vout]${scaleOut}`
-
-  const args = [
-    '-y',
-    '-i',
-    input.inputPath,
-    '-filter_complex',
-    filterComplex,
-    '-map',
-    vOut,
-  ]
-  if (useAudio) {
-    args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '96k')
-  }
-  args.push(
-    '-movflags',
-    '+faststart',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
-    '-crf',
-    env.fastExport ? '28' : '26',
-    '-threads',
-    '0',
-    input.outputPath,
+  const tmpDir = path.join(
+    path.dirname(input.outputPath),
+    `._segments-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   )
+  fs.mkdirSync(tmpDir, { recursive: true })
 
-  await execFileAsync(FFMPEG, args, { maxBuffer: 20 * 1024 * 1024 })
+  try {
+    const segmentPaths: string[] = []
+    for (let i = 0; i < limited.length; i++) {
+      const cut = limited[i]
+      const segPath = path.join(tmpDir, `seg-${String(i).padStart(3, '0')}.mp4`)
+      const duration = cut.end - cut.start
+
+      const vf = [`setpts=(PTS-STARTPTS)/${cut.speed}`]
+      if (env.fastExport) vf.push('scale=-2:720:flags=fast_bilinear')
+
+      const args = [
+        '-y',
+        '-ss',
+        cut.start.toFixed(3),
+        '-i',
+        input.inputPath,
+        '-t',
+        duration.toFixed(3),
+        '-vf',
+        vf.join(','),
+      ]
+      if (useAudio) {
+        // atempo supports 0.5–2.0; our speeds stay in range
+        args.push('-af', `atempo=${cut.speed.toFixed(3)}`, '-c:a', 'aac', '-b:a', '96k')
+      } else {
+        args.push('-an')
+      }
+      args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', crf, segPath)
+
+      await execFileAsync(FFMPEG, args, { maxBuffer: 20 * 1024 * 1024 })
+      segmentPaths.push(segPath)
+    }
+
+    const listPath = path.join(tmpDir, 'concat.txt')
+    const listContent = segmentPaths
+      .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
+      .join('\n')
+    fs.writeFileSync(listPath, listContent)
+
+    await execFileAsync(
+      FFMPEG,
+      [
+        '-y',
+        '-f',
+        'concat',
+        '-safe',
+        '0',
+        '-i',
+        listPath,
+        '-c',
+        'copy',
+        '-movflags',
+        '+faststart',
+        input.outputPath,
+      ],
+      { maxBuffer: 20 * 1024 * 1024 },
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
 }
