@@ -30,6 +30,25 @@ export async function probeDuration(filePath: string): Promise<number> {
   return Number.isFinite(duration) ? duration : 0
 }
 
+export async function probeFrameRate(filePath: string): Promise<number> {
+  const { stdout } = await execFileAsync(FFPROBE, [
+    '-v',
+    'error',
+    '-select_streams',
+    'v:0',
+    '-show_entries',
+    'stream=avg_frame_rate',
+    '-of',
+    'default=noprint_wrappers=1:nokey=1',
+    filePath,
+  ])
+  const [numStr, denStr] = stdout.trim().split('/')
+  const num = Number(numStr)
+  const den = Number(denStr ?? '1')
+  const fps = den > 0 ? num / den : num
+  return Number.isFinite(fps) && fps > 0 ? fps : 30
+}
+
 export async function probeHasAudio(filePath: string): Promise<boolean> {
   const { stdout } = await execFileAsync(FFPROBE, [
     '-v',

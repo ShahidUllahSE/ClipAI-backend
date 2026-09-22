@@ -6,6 +6,7 @@ import {
   detectSilenceRanges,
   extractAudioWav,
   probeDuration,
+  probeFrameRate,
   probeHasAudio,
   renderJumpCutVideo,
   silenceToKeepCuts,
@@ -13,6 +14,7 @@ import {
 import {
   assignSegmentSpeeds,
   remapWordsToOutput,
+  snapCutsToFrames,
   totalOutputDuration,
   wordsToCaptionCues,
   writeSrtFile,
@@ -184,6 +186,7 @@ export async function processTalkingHead(input: {
     input.durationSeconds && input.durationSeconds > 0
       ? input.durationSeconds
       : await probeDuration(input.inputPath)
+  const fps = await probeFrameRate(input.inputPath).catch(() => 30)
 
   let transcript = ''
   let words: TalkingHeadResult['words'] = []
@@ -255,6 +258,8 @@ export async function processTalkingHead(input: {
       notes.push('Applied aggressive speech-gap pass for a clearer edit')
     }
   }
+
+  baseCuts = snapCutsToFrames(baseCuts, fps)
 
   const speedLevel = input.speedRamp ?? 'off'
   const cuts = assignSegmentSpeeds(baseCuts, speedLevel, { words })

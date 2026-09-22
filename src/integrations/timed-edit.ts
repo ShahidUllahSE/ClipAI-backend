@@ -70,6 +70,27 @@ export function assignSegmentSpeeds(
   })
 }
 
+/**
+ * Snap cut boundaries to exact frame edges before anything downstream
+ * consumes them. FFmpeg can only cut on frame boundaries, so a segment's
+ * *real* rendered duration is always the requested duration rounded to the
+ * nearest frame. If caption timing is computed from the unrounded request
+ * instead, each cut adds a small (sub-frame) error that accumulates across
+ * a video with many keep-segments — captions drift further out of sync the
+ * longer the video runs. Snapping here makes the render and the caption
+ * timeline agree by construction.
+ */
+export function snapCutsToFrames<T extends { start: number; end: number }>(
+  cuts: T[],
+  fps: number,
+): T[] {
+  if (!fps || fps <= 0) return cuts
+  const snap = (t: number) => Math.round(t * fps) / fps
+  return cuts
+    .map((c) => ({ ...c, start: snap(c.start), end: snap(c.end) }))
+    .filter((c) => c.end > c.start)
+}
+
 /** Map source-timeline words onto the edited output timeline (with speed). */
 export function remapWordsToOutput(
   words: TimedWord[],

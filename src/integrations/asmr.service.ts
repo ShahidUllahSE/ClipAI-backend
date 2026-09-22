@@ -5,12 +5,14 @@ import {
   detectLoudKeepCuts,
   detectSilenceRanges,
   probeDuration,
+  probeFrameRate,
   probeHasAudio,
   renderJumpCutVideo,
   silenceToKeepCuts,
 } from './ffmpeg'
 import {
   assignSegmentSpeeds,
+  snapCutsToFrames,
   totalOutputDuration,
   type SpeedCut,
 } from './timed-edit'
@@ -194,6 +196,9 @@ export async function processAsmrUnboxing(input: {
   notes.push(
     `Keeping ${baseCuts.length} segments via ${method} (${input.pacing} pacing)`,
   )
+
+  const fps = await probeFrameRate(input.inputPath).catch(() => 30)
+  baseCuts = snapCutsToFrames(baseCuts, fps)
 
   let summary = 'ASMR/unboxing edit keeping product sound moments.'
   let category = 'product-unboxing'
