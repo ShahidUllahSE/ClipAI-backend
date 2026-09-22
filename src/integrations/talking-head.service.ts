@@ -48,7 +48,12 @@ function gapThreshold(level: SilenceSensitivity) {
   }
 }
 
-const WORD_PADDING_SECONDS = 0.12
+// Groq/Whisper word timestamps are more often early-ending than
+// late-starting (trailing sounds — S, vowels, soft consonants — fade out
+// past where the model marks the word "done"). Padding the tail more than
+// the head reduces the chance of a cut landing inside real speech.
+const WORD_PADDING_LEAD_SECONDS = 0.12
+const WORD_PADDING_TRAIL_SECONDS = 0.22
 
 export function silenceRangesFromWords(
   words: Array<{ word: string; start: number; end: number }>,
@@ -59,7 +64,7 @@ export function silenceRangesFromWords(
 
   const minGap = gapThreshold(level)
   const silenceRanges: Array<{ start: number; end: number }> = []
-  const firstStart = Math.max(0, words[0].start - WORD_PADDING_SECONDS)
+  const firstStart = Math.max(0, words[0].start - WORD_PADDING_LEAD_SECONDS)
 
   if (firstStart > 0.25) {
     silenceRanges.push({ start: 0, end: firstStart })
@@ -68,9 +73,9 @@ export function silenceRangesFromWords(
   for (let i = 1; i < words.length; i += 1) {
     const previousEnd = Math.min(
       durationSeconds,
-      words[i - 1].end + WORD_PADDING_SECONDS,
+      words[i - 1].end + WORD_PADDING_TRAIL_SECONDS,
     )
-    const nextStart = Math.max(0, words[i].start - WORD_PADDING_SECONDS)
+    const nextStart = Math.max(0, words[i].start - WORD_PADDING_LEAD_SECONDS)
     if (nextStart - previousEnd >= minGap) {
       silenceRanges.push({ start: previousEnd, end: nextStart })
     }
@@ -78,7 +83,7 @@ export function silenceRangesFromWords(
 
   const lastEnd = Math.min(
     durationSeconds,
-    words[words.length - 1].end + WORD_PADDING_SECONDS,
+    words[words.length - 1].end + WORD_PADDING_TRAIL_SECONDS,
   )
   if (durationSeconds - lastEnd > 0.25) {
     silenceRanges.push({ start: lastEnd, end: durationSeconds })
@@ -246,18 +251,8 @@ export async function processTalkingHead(input: {
     baseCuts = [{ start: 0, end: duration }]
   }
 
-  let keepSeconds = totalKeepSeconds(baseCuts)
-  let removedSeconds = Math.max(0, duration - keepSeconds)
-
-  if (removedSeconds < Math.min(1, duration * 0.05) && words.length > 2) {
-    const aggressiveCuts = cutsFromWords(words, duration, 'aggressive')
-    if (totalKeepSeconds(aggressiveCuts) < keepSeconds) {
-      baseCuts = aggressiveCuts
-      keepSeconds = totalKeepSeconds(baseCuts)
-      removedSeconds = Math.max(0, duration - keepSeconds)
-      notes.push('Applied aggressive speech-gap pass for a clearer edit')
-    }
-  }
+  const keepSeconds = totalKeepSeconds(baseCuts)
+  const removedSeconds = Math.max(0, duration - keepSeconds)
 
   baseCuts = snapCutsToFrames(baseCuts, fps)
 
@@ -277,7 +272,7 @@ export async function processTalkingHead(input: {
 
   const outputDurationSeconds = totalOutputDuration(cuts)
   notes.push(
-    `Output ~${outputDurationSeconds.toFixed(1)}s (removed ~${Math.max(0, duration - keepSeconds).toFixed(1)}s of pauses)`,
+    `Output ~${outputDurationSeconds.toFixed(1)}s (removed ~${removedSeconds.toFixed(1)}s of pauses)`,
   )
 
   let captionsPath: string | undefined
@@ -309,6 +304,6 @@ export async function processTalkingHead(input: {
     outputPath: input.outputPath,
     outputUrl: input.outputUrl,
     notes,
-    removedSeconds: Math.max(0, duration - keepSeconds),
+    removedSeconds,
   }
 }
