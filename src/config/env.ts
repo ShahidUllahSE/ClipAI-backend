@@ -36,6 +36,13 @@ const envSchema = z.object({
     .optional()
     .default('false')
     .transform((v) => v === 'true' || v === '1'),
+  /**
+   * Concurrent input decoders per jump-cut render batch. Each batch runs one
+   * ffmpeg process with this many simultaneous -ss/-i decoders feeding a
+   * shared filter_complex + concat. Too high reliably fails with "Cannot
+   * allocate memory" on modest hardware — tune down on a low-RAM VPS.
+   */
+  JUMPCUT_BATCH_SIZE: z.coerce.number().int().positive().default(2),
   CLOUDINARY_URL: z.string().optional().default(''),
   CLOUDINARY_CLOUD_NAME: z.string().optional().default(''),
   CLOUDINARY_NAME: z.string().optional().default(''),

@@ -439,28 +439,41 @@ export async function processTalkingHead(input: {
 
         try {
           silenceRanges = await detectTalkingHeadPauses(input.inputPath)
-          const refined = mergeIncompleteThoughtCuts(
-            snapCutsToCompleteWords(
-              splitCutsBySilence(
-                baseCuts,
-                silenceRanges,
-                pauseMin(input.silenceSensitivity),
-              ),
-              compactWords,
-              duration,
-            ),
-            compactWords,
-          )
-          if (
-            refined.length &&
-            refined.length <= baseCuts.length + 2 &&
-            wordCoverage(refined, compactWords) >=
-              wordCoverage(baseCuts, compactWords) * 0.98 &&
-            totalKeepSeconds(refined) < totalKeepSeconds(baseCuts) - 0.5
-          ) {
-            baseCuts = mergeCutsSharingWords(refined, compactWords)
+          const minSilence = pauseMin(input.silenceSensitivity)
+          let splitCount = 0
+
+          // Evaluate each phrase's internal-pause split on its own merits
+          // instead of one video-wide accept/reject gate. A single sentence
+          // needing several splits used to veto pause-trimming for every
+          // other phrase in the video, leaving real dead air baked into cuts
+          // that had nothing wrong with them.
+          const refinedCuts = baseCuts.flatMap((cut) => {
+            const wordsInCut = compactWords.filter(
+              (w) => w.end > cut.start && w.start < cut.end,
+            )
+            const split = splitCutsBySilence([cut], silenceRanges, minSilence)
+            if (split.length < 2) return [cut]
+
+            const snapped = mergeIncompleteThoughtCuts(
+              snapCutsToCompleteWords(split, wordsInCut, duration),
+              wordsInCut,
+            )
+            const coverageOk =
+              wordCoverage(snapped, wordsInCut) >= wordsInCut.length * 0.98
+            const savedEnough =
+              totalKeepSeconds([cut]) - totalKeepSeconds(snapped) > 0.15
+
+            if (snapped.length > 1 && coverageOk && savedEnough) {
+              splitCount += snapped.length - 1
+              return snapped
+            }
+            return [cut]
+          })
+
+          if (splitCount > 0) {
+            baseCuts = mergeCutsSharingWords(refinedCuts, compactWords)
             notes.push(
-              `Dropped leftover pauses between thoughts: ${baseCuts.length} keep-segments`,
+              `Dropped ${splitCount} internal pause${splitCount === 1 ? '' : 's'} inside spoken thoughts (${baseCuts.length} keep-segments)`,
             )
           } else {
             baseCuts = mergeCutsSharingWords(baseCuts, compactWords)

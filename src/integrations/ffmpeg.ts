@@ -4,6 +4,7 @@ import path from 'path'
 import { promisify } from 'util'
 import ffmpegPath from 'ffmpeg-static'
 import ffprobePath from 'ffprobe-static'
+import { env } from '../config'
 
 const execFileAsync = promisify(execFile)
 
@@ -989,7 +990,12 @@ export async function renderJumpCutVideo(input: {
   const sourceFps = await probeFrameRate(input.inputPath)
   const fps = exportFps(sourceFps)
   const crf = '23'
-  const batchSize = 8
+  // Each batch opens one ffmpeg process with `cuts.length` concurrent input
+  // decoders (own -ss/-i per cut) feeding a shared filter_complex + concat.
+  // 8 (the old fixed value) reliably fails with "Cannot allocate memory"
+  // mid-filter even on a 16GB dev box; verified 2 renders cleanly. Tunable
+  // via JUMPCUT_BATCH_SIZE since actual headroom depends on the deploy box.
+  const batchSize = env.JUMPCUT_BATCH_SIZE
   const applyMotion =
     motion !== 'none' || Boolean(input.perCutMotions?.length) || Boolean(input.extraZoomByCut?.length)
   const display = await probeDisplaySize(input.inputPath)
