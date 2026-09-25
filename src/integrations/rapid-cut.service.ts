@@ -14,6 +14,12 @@ import {
 } from './ffmpeg'
 import { transcribeSourceAudio } from './groq-transcribe'
 import {
+  detectSpeechActivity,
+  isFillerWord,
+  tightenWordsToSpeech,
+  trimNonSpeechFromCuts,
+} from './speech-activity'
+import {
   extraZoomByCutFromTimeline,
   perCutMotionsFromTimeline,
 } from './timeline-fx'
@@ -759,6 +765,7 @@ export async function processRapidCut(input: {
   // talk and caption-less holds. Music-only clips stay on the energy path.
   let usedTranscript = false
   let transcriptWords: TimedWord[] = []
+  let rawTranscriptWords: TimedWord[] = []
   if (env.GROQ_API_KEY) {
     const tempDir = path.join(path.dirname(input.outputPath), '.tmp')
     fs.mkdirSync(tempDir, { recursive: true })
@@ -843,6 +850,7 @@ export async function processRapidCut(input: {
             provider = 'ffmpeg+groq'
             usedTranscript = true
             transcriptWords = compact
+            rawTranscriptWords = stt.words
             notes.push(
               `Cut leftover speech from transcript (${compact.length} words, ${beforeDrop} thoughts → ${spokenCuts.length} complete sentences)`,
             )
@@ -884,6 +892,35 @@ export async function processRapidCut(input: {
         input.inputPath,
       )
       baseCuts = mergeOverlappingCuts(baseCuts)
+      try {
+        report(74, 'Removing non-speech sounds')
+        const map = await detectSpeechActivity(input.inputPath)
+        const tight = map
+          ? tightenWordsToSpeech(rawTranscriptWords, map)
+          : null
+        if (map && tight?.reliable) {
+          const spoken = tight.words.filter((word) => !isFillerWord(word.word))
+          const trimmed = trimNonSpeechFromCuts(
+            baseCuts,
+            spoken,
+            map,
+            duration,
+            { pauseSeconds: 0.45 },
+          )
+          if (trimmed.length >= 1) {
+            const before = totalKeep(baseCuts)
+            baseCuts = trimmed
+            transcriptWords = spoken
+            notes.push(
+              `Removed ~${Math.max(0, before - totalKeep(baseCuts)).toFixed(1)}s of non-speech sound (breaths, fillers, noise) via ${map.engine}`,
+            )
+          }
+        }
+      } catch (error) {
+        notes.push(
+          `Non-speech pass skipped: ${error instanceof Error ? error.message.slice(0, 120) : 'unknown'}`,
+        )
+      }
     }
   } else {
     baseCuts = dropTinyCuts(baseCuts)

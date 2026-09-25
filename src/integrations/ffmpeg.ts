@@ -115,6 +115,15 @@ export function exportFps(sourceFps: number): 30 | 60 {
 
 export type SilenceSensitivity = 'light' | 'medium' | 'aggressive'
 
+/**
+ * Keep decoded audio on the container clock. Some phone videos (WhatsApp)
+ * have a timestamp hole at the start; a plain decode closes it, so every
+ * transcript/analysis time lands early vs the -ss seeks used to render —
+ * clips then start on the pause before a word and chop its ending.
+ * async=1 fills holes with silence; first_pts=0 pads a late start.
+ */
+export const AUDIO_TIMELINE_FILTER = 'aresample=async=1:first_pts=0'
+
 function silenceFilter(level: SilenceSensitivity) {
   switch (level) {
     case 'light':
@@ -434,6 +443,8 @@ export async function extractAudioWav(
     '-sn',
     '-map',
     '0:a:0',
+    '-af',
+    AUDIO_TIMELINE_FILTER,
     '-ac',
     '1',
     '-ar',
@@ -492,6 +503,8 @@ export async function extractAudioForStt(
       '-sn',
       '-map',
       '0:a:0',
+      '-af',
+      AUDIO_TIMELINE_FILTER,
       '-ac',
       '1',
       '-ar',
@@ -515,6 +528,8 @@ export async function extractAudioForStt(
       '-sn',
       '-map',
       '0:a:0',
+      '-af',
+      AUDIO_TIMELINE_FILTER,
       '-ac',
       '1',
       '-ar',
@@ -903,10 +918,16 @@ async function renderSeekedBatch(input: {
       `[${i}:v]trim=start=${preroll}:duration=${trimDur},${pts},${fpsPrefix}${motionScaleCrop(globalIndex, playDur, cutMotion, input.w, input.h, focus, shot, input.portrait, extraZoom)}[v${i}]`,
     )
     if (input.useAudio) {
+      // Micro fades at every join: no click where the waveform is cut, and
+      // no half-breath edge left at a keep-segment boundary.
+      const audioDur = cutDur / spd
+      const fadeIn = Math.min(0.012, audioDur / 4)
+      const fadeOut = Math.min(0.025, audioDur / 4)
+      const fades = `afade=t=in:d=${fadeIn.toFixed(3)},afade=t=out:st=${Math.max(0, audioDur - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}`
       const audio =
         spd === 1
-          ? `[${i}:a]atrim=start=${preroll}:duration=${trimDur},asetpts=PTS-STARTPTS,aresample=44100:async=1[a${i}]`
-          : `[${i}:a]atrim=start=${preroll}:duration=${trimDur},asetpts=PTS-STARTPTS,atempo=${spd.toFixed(3)},aresample=44100:async=1[a${i}]`
+          ? `[${i}:a]atrim=start=${preroll}:duration=${trimDur},asetpts=PTS-STARTPTS,${fades},aresample=44100:async=1[a${i}]`
+          : `[${i}:a]atrim=start=${preroll}:duration=${trimDur},asetpts=PTS-STARTPTS,atempo=${spd.toFixed(3)},${fades},aresample=44100:async=1[a${i}]`
       filters.push(audio)
       concatInputs.push(`[v${i}][a${i}]`)
     } else {

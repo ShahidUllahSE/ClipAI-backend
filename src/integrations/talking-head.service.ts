@@ -40,6 +40,13 @@ import {
   type SpeedCut,
 } from './timed-edit'
 import { burnTimedCaptions } from './export-polish.service'
+import { GROQ_CHUNK_SECONDS, transcribeSourceAudio } from './groq-transcribe'
+import {
+  detectSpeechActivity,
+  isFillerWord,
+  tightenWordsToSpeech,
+  trimNonSpeechFromCuts,
+} from './speech-activity'
 
 export interface TalkingHeadResult {
   provider: 'ffmpeg' | 'ffmpeg+groq'
@@ -162,205 +169,6 @@ export function fallbackCutsFromSilence(
     start: Math.max(0, cut.start - 0.12),
     end: Math.min(durationSeconds, cut.end + 0.24),
   }))
-}
-
-const GROQ_CHUNK_SECONDS = 8 * 60
-
-async function transcribeWithGroq(
-  audioPath: string,
-  mimeType: string,
-  offsetSeconds = 0,
-): Promise<{
-  transcript: string
-  words: Array<{ word: string; start: number; end: number }>
-  phrases: CaptionCue[]
-}> {
-  if (!env.GROQ_API_KEY) {
-    return { transcript: '', words: [], phrases: [] }
-  }
-
-  const bytes = fs.readFileSync(audioPath)
-  const form = new FormData()
-  form.append(
-    'file',
-    new Blob([new Uint8Array(bytes)], { type: mimeType }),
-    path.basename(audioPath),
-  )
-  form.append('model', 'whisper-large-v3-turbo')
-  form.append('response_format', 'verbose_json')
-  form.append('timestamp_granularities[]', 'word')
-  form.append('timestamp_granularities[]', 'segment')
-
-  const response = await fetch(
-    'https://api.groq.com/openai/v1/audio/transcriptions',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.GROQ_API_KEY}`,
-      },
-      body: form,
-    },
-  )
-
-  if (!response.ok) {
-    const detail = await response.text()
-    if (/whisper-large-v3-turbo/i.test(detail)) {
-      return transcribeWithGroqLegacy(audioPath, mimeType, offsetSeconds)
-    }
-    throw new Error(`Groq STT failed: ${detail}`)
-  }
-
-  return parseGroqTranscript(
-    (await response.json()) as {
-      text?: string
-      words?: GroqWord[]
-      segments?: GroqSegment[]
-    },
-    offsetSeconds,
-  )
-}
-
-async function transcribeWithGroqLegacy(
-  audioPath: string,
-  mimeType: string,
-  offsetSeconds: number,
-) {
-  const bytes = fs.readFileSync(audioPath)
-  const form = new FormData()
-  form.append(
-    'file',
-    new Blob([new Uint8Array(bytes)], { type: mimeType }),
-    path.basename(audioPath),
-  )
-  form.append('model', 'whisper-large-v3')
-  form.append('response_format', 'verbose_json')
-  form.append('timestamp_granularities[]', 'word')
-  form.append('timestamp_granularities[]', 'segment')
-
-  const response = await fetch(
-    'https://api.groq.com/openai/v1/audio/transcriptions',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.GROQ_API_KEY}`,
-      },
-      body: form,
-    },
-  )
-  if (!response.ok) {
-    throw new Error(`Groq STT failed: ${await response.text()}`)
-  }
-  return parseGroqTranscript(
-    (await response.json()) as {
-      text?: string
-      words?: GroqWord[]
-      segments?: GroqSegment[]
-    },
-    offsetSeconds,
-  )
-}
-
-type GroqWord = { word?: string; start?: number; end?: number }
-type GroqSegment = {
-  text?: string
-  start?: number
-  end?: number
-  words?: GroqWord[]
-}
-
-function mapGroqWords(raw: GroqWord[] | undefined, offsetSeconds: number) {
-  return (raw ?? [])
-    .filter(
-      (w) =>
-        typeof w.word === 'string' &&
-        typeof w.start === 'number' &&
-        typeof w.end === 'number',
-    )
-    .map((w) => ({
-      word: String(w.word),
-      start: Number(w.start) + offsetSeconds,
-      end: Number(w.end) + offsetSeconds,
-    }))
-}
-
-function parseGroqTranscript(
-  data: {
-    text?: string
-    words?: GroqWord[]
-    segments?: GroqSegment[]
-  },
-  offsetSeconds: number,
-) {
-  let words = mapGroqWords(data.words, offsetSeconds)
-
-  if (!words.length) {
-    words = (data.segments ?? []).flatMap((segment) =>
-      mapGroqWords(segment.words, offsetSeconds),
-    )
-  }
-
-  const phrases: CaptionCue[] = (data.segments ?? [])
-    .map((segment) => {
-      const text = String(segment.text ?? '').replace(/\s+/g, ' ').trim()
-      const start = Number(segment.start)
-      const end = Number(segment.end)
-      if (!text || !Number.isFinite(start) || !Number.isFinite(end)) return null
-      return {
-        text,
-        start: start + offsetSeconds,
-        end: end + offsetSeconds,
-      }
-    })
-    .filter((row): row is CaptionCue => Boolean(row))
-
-  return {
-    transcript: (data.text ?? words.map((w) => w.word).join(' ')).trim(),
-    words,
-    phrases,
-  }
-}
-
-async function transcribeSourceAudio(
-  inputPath: string,
-  durationSeconds: number,
-  tempDir: string,
-): Promise<{
-  transcript: string
-  words: Array<{ word: string; start: number; end: number }>
-  phrases: CaptionCue[]
-}> {
-  const extracted = await extractAudioForStt(
-    inputPath,
-    path.join(tempDir, `audio-${Date.now()}`),
-  )
-
-  try {
-    if (durationSeconds <= GROQ_CHUNK_SECONDS + 30) {
-      return transcribeWithGroq(extracted.path, extracted.mimeType)
-    }
-
-    const transcriptParts: string[] = []
-    const words: Array<{ word: string; start: number; end: number }> = []
-    const phrases: CaptionCue[] = []
-
-    for (let start = 0; start < durationSeconds; start += GROQ_CHUNK_SECONDS) {
-      const chunkDur = Math.min(GROQ_CHUNK_SECONDS, durationSeconds - start)
-      const chunkPath = path.join(tempDir, `chunk-${start}.mp3`)
-      await extractAudioSlice(extracted.path, chunkPath, start, chunkDur)
-      try {
-        const part = await transcribeWithGroq(chunkPath, 'audio/mpeg', start)
-        if (part.transcript.trim()) transcriptParts.push(part.transcript.trim())
-        words.push(...part.words)
-        phrases.push(...part.phrases)
-      } finally {
-        if (fs.existsSync(chunkPath)) fs.unlinkSync(chunkPath)
-      }
-    }
-
-    return { transcript: transcriptParts.join(' '), words, phrases }
-  } finally {
-    if (fs.existsSync(extracted.path)) fs.unlinkSync(extracted.path)
-  }
 }
 
 /**
@@ -532,9 +340,50 @@ export async function processTalkingHead(input: {
     }
   }
 
+  // Strip non-speech sounds (breaths, lip smacks, umms, coughs, room noise).
+  // silencedetect never removes these because they are not quiet.
+  let speechWords = words
+  if (words.length && baseCuts.length) {
+    try {
+      report(75, 'Removing non-speech sounds')
+      const map = await detectSpeechActivity(input.inputPath)
+      const tight = map
+        ? tightenWordsToSpeech(words, map)
+        : null
+      if (map && tight?.reliable) {
+        const spoken = tight.words.filter((word) => !isFillerWord(word.word))
+        const spokenInCuts = wordCoverage(baseCuts, spoken)
+        const trimmed = trimNonSpeechFromCuts(baseCuts, spoken, map, duration, {
+          pauseSeconds: pauseMin(input.silenceSensitivity),
+        })
+        if (
+          trimmed.length &&
+          wordCoverage(trimmed, spoken) >= spokenInCuts * 0.98
+        ) {
+          const before = totalKeepSeconds(baseCuts)
+          baseCuts = trimmed
+          speechWords = spoken
+          keepSeconds = totalKeepSeconds(baseCuts)
+          removedSeconds = Math.max(0, duration - keepSeconds)
+          notes.push(
+            `Removed ~${Math.max(0, before - keepSeconds).toFixed(1)}s of non-speech sound (breaths, fillers, noise) via ${map.engine} — ${baseCuts.length} keep-segments`,
+          )
+        }
+      } else {
+        notes.push('Non-speech pass skipped: voice not separable from background')
+      }
+    } catch (error) {
+      notes.push(
+        `Non-speech pass skipped: ${
+          error instanceof Error ? error.message.slice(0, 120) : 'ffmpeg error'
+        }`,
+      )
+    }
+  }
+
   const speedLevel = input.speedRamp ?? 'off'
-  const cuts = words.length
-    ? assignSegmentSpeeds(baseCuts, speedLevel, { words })
+  const cuts = speechWords.length
+    ? assignSegmentSpeeds(baseCuts, speedLevel, { words: speechWords })
     : baseCuts.map((cut) => ({ ...cut, speed: 1 }))
   const sped = cuts.some((c) => c.speed !== 1)
   if (sped) {
@@ -584,8 +433,8 @@ export async function processTalkingHead(input: {
   let captionsBurned = false
   const wantCaptions = Boolean(input.captions)
   if (wantCaptions) {
-    const cues = words.length
-      ? wordsToCaptionCues(remapWordsToOutput(words, cuts))
+    const cues = speechWords.length
+      ? wordsToCaptionCues(remapWordsToOutput(speechWords, cuts))
       : remapCuesToOutput(splitLongCaptionCues(phrases), cuts)
     if (cues.length) {
       captionsPath = path.join(

@@ -1,10 +1,12 @@
+import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
 import { env } from '../config'
 import { extractAudioForStt, extractAudioSlice } from './ffmpeg'
 import type { CaptionCue, TimedWord } from './timed-edit'
+import { WHISPER_FILLER_PROMPT } from './speech-activity'
 
-const GROQ_CHUNK_SECONDS = 8 * 60
+export const GROQ_CHUNK_SECONDS = 8 * 60
 
 type GroqWord = { word?: string; start?: number; end?: number }
 type GroqSegment = {
@@ -88,6 +90,7 @@ async function transcribeWithGroqLegacy(
   form.append('response_format', 'verbose_json')
   form.append('timestamp_granularities[]', 'word')
   form.append('timestamp_granularities[]', 'segment')
+  form.append('prompt', WHISPER_FILLER_PROMPT)
 
   const response = await fetch(
     'https://api.groq.com/openai/v1/audio/transcriptions',
@@ -132,6 +135,7 @@ async function transcribeWithGroq(
   form.append('response_format', 'verbose_json')
   form.append('timestamp_granularities[]', 'word')
   form.append('timestamp_granularities[]', 'segment')
+  form.append('prompt', WHISPER_FILLER_PROMPT)
 
   const response = await fetch(
     'https://api.groq.com/openai/v1/audio/transcriptions',
@@ -162,8 +166,62 @@ async function transcribeWithGroq(
   )
 }
 
-/** Same Groq Whisper path Talking-head uses — Rapid-cut only. */
+/** Bump when the Groq request changes (model, prompt) so old cache entries miss. */
+const CACHE_VERSION = 'v2-container-clock'
+
+function hashFile(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha1')
+    fs.createReadStream(filePath)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('error', reject)
+      .on('end', () => resolve(hash.digest('hex')))
+  })
+}
+
+function cachePathFor(inputPath: string, digest: string) {
+  return path.join(
+    path.dirname(inputPath),
+    '.cache',
+    'transcripts',
+    `${digest}-${CACHE_VERSION}.json`,
+  )
+}
+
+/**
+ * Groq Whisper transcript of the source (Talking-head + Rapid-cut). Cached
+ * by file content, so re-editing the same upload with new settings does not
+ * pay for (or wait on) transcription again.
+ */
 export async function transcribeSourceAudio(
+  inputPath: string,
+  durationSeconds: number,
+  tempDir: string,
+): Promise<GroqTranscript> {
+  let cachePath: string | null = null
+  try {
+    cachePath = cachePathFor(inputPath, await hashFile(inputPath))
+    if (fs.existsSync(cachePath)) {
+      const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as GroqTranscript
+      if (Array.isArray(cached.words) && Array.isArray(cached.phrases)) return cached
+    }
+  } catch {
+    cachePath = null
+  }
+
+  const result = await transcribeUncached(inputPath, durationSeconds, tempDir)
+  if (cachePath && env.GROQ_API_KEY && result.words.length) {
+    try {
+      fs.mkdirSync(path.dirname(cachePath), { recursive: true })
+      fs.writeFileSync(cachePath, JSON.stringify(result))
+    } catch {
+      /* cache is best-effort */
+    }
+  }
+  return result
+}
+
+async function transcribeUncached(
   inputPath: string,
   durationSeconds: number,
   tempDir: string,
