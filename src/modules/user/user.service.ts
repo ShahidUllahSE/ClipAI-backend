@@ -145,8 +145,8 @@ export const userService = {
       email: input.email,
       passwordHash: await hashPassword(input.password),
       planId,
-      remainingEdits: PLAN_EDIT_QUOTA[planId],
-      billingStatus: 'active',
+      remainingEdits: 0,
+      billingStatus: 'none',
     })
 
     const raw = await issueToken(
@@ -337,9 +337,9 @@ export const userService = {
   async useEditCredit(userId: string): Promise<{ user: PublicUser }> {
     const user = await findUserOrFail(userId)
 
-    if (user.billingStatus === 'canceled') {
+    if (user.billingStatus !== 'active') {
       throw new AppError(
-        'Subscription canceled. Reactivate a plan to process.',
+        'Choose a plan to start rendering. No payment is required yet.',
         HTTP_STATUS.PAYMENT_REQUIRED,
       )
     }

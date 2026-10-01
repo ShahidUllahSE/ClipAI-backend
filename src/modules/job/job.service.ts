@@ -12,9 +12,9 @@ export const jobService = {
   async start(projectId: string, userId: string) {
     const user = await UserModel.findById(userId)
     if (!user) throw new AppError('Not signed in.', HTTP_STATUS.UNAUTHORIZED)
-    if (user.billingStatus === 'canceled') {
+    if (user.billingStatus !== 'active') {
       throw new AppError(
-        'Subscription canceled. Reactivate a plan to process.',
+        'Choose a plan to start rendering. No payment is required yet.',
         HTTP_STATUS.PAYMENT_REQUIRED,
       )
     }
