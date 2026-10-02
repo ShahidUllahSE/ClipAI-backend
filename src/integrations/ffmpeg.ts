@@ -709,13 +709,24 @@ function motionScaleCrop(
     return `${cover},scale=iw*${z}:ih*${z}:flags=fast_bilinear,${crop},setsar=1`
   }
 
+  const zoomWindow = Math.max(0.45, Math.min(duration, Math.max(0.8, duration * 0.85)))
+  const d = zoomWindow.toFixed(3)
+  const applyLive = (fromZ: number, toZ: number, fx: number, fy: number) => {
+    const a = Math.max(1, fromZ * zMul)
+    const b = Math.max(1, toZ * zMul)
+    const crop = `crop=${w}:${h}:${cropAround(fx, fy)}`
+    if (Math.abs(a - b) < 0.02) return apply(a, fx, fy)
+    const zExpr = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,t/${d})`
+    return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,${crop},setsar=1`
+  }
+
   if (motion === 'none') return apply(1, 0.5, 0.5)
 
   // Portrait source: overall = the original 9:16 frame. Do not pan.
   if (portrait) {
-    if (motion === 'zoom-in') return apply(1.12, 0.5, 0.5)
-    if (motion === 'zoom-out') return apply(1, 0.5, 0.5)
-    if (motion === 'ken-burns') return apply(1.08, 0.5, 0.5)
+    if (motion === 'zoom-in') return applyLive(1, 1.22, 0.5, 0.5)
+    if (motion === 'zoom-out') return applyLive(1.24, 1, 0.5, 0.5)
+    if (motion === 'ken-burns') return applyLive(1, 1.16, 0.5, 0.5)
     if (motion === 'fade') {
       const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
       const base = apply(1, 0.5, 0.5)
@@ -749,12 +760,12 @@ function motionScaleCrop(
     y: 0.5,
   }
 
-  if (motion === 'zoom-in') return apply(1.12, speaker.x, 0.5)
-  if (motion === 'zoom-out') return apply(1, scene.x, 0.5)
+  if (motion === 'zoom-in') return applyLive(1, 1.22, speaker.x, 0.5)
+  if (motion === 'zoom-out') return applyLive(1.24, 1, scene.x, 0.5)
+  if (motion === 'ken-burns') return applyLive(1, 1.16, speaker.x, 0.5)
   if (motion === 'punch') {
     return shot === 'wide' ? apply(1, scene.x, 0.5) : apply(1.12, speaker.x, 0.5)
   }
-  if (motion === 'ken-burns') return apply(1.1, speaker.x, 0.5)
   if (motion === 'fade') {
     const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
     const base = apply(1, scene.x, 0.5)

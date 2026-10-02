@@ -8,6 +8,7 @@ import {
   probeHasAudio,
   renderJumpCutVideo,
   silenceToKeepCuts,
+  type ClipMotion,
 } from './ffmpeg'
 import {
   extraZoomByCutFromTimeline,
@@ -185,6 +186,7 @@ export async function processAsmrUnboxing(input: {
   speedRamp?: 'off' | 'light' | 'medium' | 'aggressive'
   durationSeconds?: number
   timelineJson?: unknown
+  motion?: ClipMotion
   onProgress?: (percent: number, note?: string) => void
 }): Promise<AsmrResult> {
   const notes: string[] = [
@@ -326,6 +328,7 @@ export async function processAsmrUnboxing(input: {
     outputPath: input.outputPath,
     cuts,
     keepAudio: input.keepAudio,
+    motion: input.motion ?? 'none',
     perCutMotions,
     extraZoomByCut,
     onProgress: (ratio) =>
@@ -334,6 +337,8 @@ export async function processAsmrUnboxing(input: {
   input.onProgress?.(94, 'Finishing export')
   if (perCutMotions?.length) {
     notes.push(`Applied ${perCutMotions[0]} to every keep-segment`)
+  } else if (input.motion && input.motion !== 'none') {
+    notes.push(`Zoom/motion on each kept moment: ${input.motion}`)
   }
   if (extraZoomByCut?.length) {
     notes.push('Manual zoom keyframes baked into keep-segments')

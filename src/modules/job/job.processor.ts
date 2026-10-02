@@ -173,13 +173,15 @@ function unlinkQuiet(filePath?: string) {
   }
 }
 
-function clipMotionFromTimeline(timelineJson: unknown): ClipMotion {
+function clipMotionFromTimeline(
+  timelineJson: unknown,
+  options?: { keyframing?: boolean; keyframePreset?: string },
+): ClipMotion {
   const json = timelineJson as {
     timeline?: { transition?: { type?: string } | null }
     output?: { transition?: { type?: string } | null }
   } | null
   const type = json?.timeline?.transition?.type ?? json?.output?.transition?.type
-  if (type === 'none') return 'none'
   if (
     type === 'zoom-in' ||
     type === 'zoom-out' ||
@@ -193,6 +195,11 @@ function clipMotionFromTimeline(timelineJson: unknown): ClipMotion {
   ) {
     return type
   }
+  if (options?.keyframing) {
+    if (options.keyframePreset === 'slow-zoom-out') return 'zoom-out'
+    return 'zoom-in'
+  }
+  if (type === 'none') return 'none'
   return 'punch'
 }
 
@@ -462,7 +469,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         captions: Boolean(options.captions),
         captionOptions: options,
         durationSeconds: project.durationSeconds,
-        motion: clipMotionFromTimeline(options.timelineJson),
+        motion: clipMotionFromTimeline(options.timelineJson, options),
         timelineJson: options.timelineJson,
         aspectRatio: options.aspectRatio,
         onProgress: writeProgress,
@@ -703,6 +710,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         speedRamp: options.speedRamp,
         durationSeconds: project.durationSeconds,
         timelineJson: options.timelineJson,
+        motion: clipMotionFromTimeline(options.timelineJson, options),
         onProgress: writeProgress,
       })
 
@@ -890,7 +898,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         keepAudio: options.keepAudio,
         speedRamp: options.speedRamp,
         durationSeconds: project.durationSeconds,
-        motion: clipMotionFromTimeline(options.timelineJson),
+        motion: clipMotionFromTimeline(options.timelineJson, options),
         timelineJson: options.timelineJson,
         aspectRatio: options.aspectRatio,
         onProgress: writeProgress,
