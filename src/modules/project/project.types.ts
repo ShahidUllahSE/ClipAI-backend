@@ -23,6 +23,7 @@ export interface ProjectOptionsDto {
     | 'slow-zoom-out'
     | 'speaker-punch-in'
     | 'product-reveal-zoom'
+  zoomEffect?: 'none' | 'punch' | 'zoom-in' | 'zoom-out' | 'ken-burns'
   keepAudio: boolean
   audioNormalize: boolean
   /** ClipAI local tools (no API keys) */

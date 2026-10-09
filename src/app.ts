@@ -21,8 +21,19 @@ export function createApp() {
     (req, res, next) => {
       res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
       if ('download' in req.query) {
-        const name = path.basename(req.path) || 'video.mp4'
-        res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+        const raw =
+          typeof req.query.filename === 'string' && req.query.filename.trim()
+            ? req.query.filename.trim()
+            : path.basename(req.path) || 'video.mp4'
+        const ascii = raw
+          .replace(/[^\x20-\x7E]/g, '_')
+          .replace(/"/g, '_')
+          .slice(0, 160)
+        const encoded = encodeURIComponent(raw.slice(0, 160))
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`,
+        )
       }
       next()
     },

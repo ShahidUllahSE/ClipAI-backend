@@ -50,6 +50,14 @@ export const KEYFRAME_PRESETS = [
   'speaker-punch-in',
   'product-reveal-zoom',
 ] as const
+export const ZOOM_EFFECTS = [
+  'none',
+  'punch',
+  'zoom-in',
+  'zoom-out',
+  'ken-burns',
+] as const
+export type ZoomEffectId = (typeof ZOOM_EFFECTS)[number]
 export const CROP_PRESETS = [
   'none',
   'center',

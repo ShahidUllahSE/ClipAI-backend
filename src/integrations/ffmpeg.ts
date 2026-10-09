@@ -720,13 +720,24 @@ function motionScaleCrop(
     return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,${crop},setsar=1`
   }
 
+  const applyKenBurns = (fx: number, fy: number) => {
+    const a = Math.max(1.04, 1.04 * zMul)
+    const b = Math.max(a + 0.18, 1.36 * zMul)
+    const px = (Math.min(0.78, Math.max(0.22, fx)) - 0.5).toFixed(3)
+    const py = (Math.min(0.7, Math.max(0.3, fy)) - 0.5).toFixed(3)
+    const zExpr = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,t/${d})`
+    const xExpr = `(iw-ow)/2+(iw-ow)*${px}*min(1\\,t/${d})`
+    const yExpr = `(ih-oh)/2+(ih-oh)*${py}*min(1\\,t/${d})`
+    return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,crop=${w}:${h}:'${xExpr}':'${yExpr}',setsar=1`
+  }
+
   if (motion === 'none') return apply(1, 0.5, 0.5)
 
   // Portrait source: overall = the original 9:16 frame. Do not pan.
   if (portrait) {
-    if (motion === 'zoom-in') return applyLive(1, 1.22, 0.5, 0.5)
-    if (motion === 'zoom-out') return applyLive(1.24, 1, 0.5, 0.5)
-    if (motion === 'ken-burns') return applyLive(1, 1.16, 0.5, 0.5)
+    if (motion === 'zoom-in') return applyLive(1, 1.28, 0.5, 0.5)
+    if (motion === 'zoom-out') return applyLive(1.32, 1, 0.5, 0.5)
+    if (motion === 'ken-burns') return applyKenBurns(0.62, 0.4)
     if (motion === 'fade') {
       const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
       const base = apply(1, 0.5, 0.5)
@@ -760,9 +771,9 @@ function motionScaleCrop(
     y: 0.5,
   }
 
-  if (motion === 'zoom-in') return applyLive(1, 1.22, speaker.x, 0.5)
-  if (motion === 'zoom-out') return applyLive(1.24, 1, scene.x, 0.5)
-  if (motion === 'ken-burns') return applyLive(1, 1.16, speaker.x, 0.5)
+  if (motion === 'zoom-in') return applyLive(1, 1.28, speaker.x, 0.5)
+  if (motion === 'zoom-out') return applyLive(1.32, 1, scene.x, 0.5)
+  if (motion === 'ken-burns') return applyKenBurns(speaker.x, speaker.y)
   if (motion === 'punch') {
     return shot === 'wide' ? apply(1, scene.x, 0.5) : apply(1.12, speaker.x, 0.5)
   }
@@ -815,6 +826,10 @@ function removeDirQuiet(dirPath: string) {
   } catch {
     /* ignore */
   }
+}
+
+export async function concatSourceVideos(files: string[], outputPath: string) {
+  await concatCopy(files, outputPath)
 }
 
 async function concatCopy(files: string[], outputPath: string) {

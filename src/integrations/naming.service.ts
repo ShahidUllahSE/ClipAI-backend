@@ -13,7 +13,11 @@ function slugify(text: string) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 60)
+    .slice(0, 80)
+}
+
+export function filenameFromTitle(title: string) {
+  return `${slugify(title) || 'export'}.mp4`
 }
 
 function mockNaming(filename: string, mode: EditingModeId): NamingResult {
@@ -30,7 +34,7 @@ function mockNaming(filename: string, mode: EditingModeId): NamingResult {
   return {
     provider: 'mock',
     title,
-    outputFilename: `${slugify(title) || 'export'}.mp4`,
+    outputFilename: filenameFromTitle(title),
   }
 }
 
@@ -60,10 +64,7 @@ export async function generateProjectName(input: {
       outputFilename?: string
     }>(text)
     const title = (parsed.title || 'Untitled Clip').slice(0, 80)
-    const outputFilename = (
-      parsed.outputFilename || `${slugify(title)}.mp4`
-    ).replace(/[^\w.\-]/g, '-')
-    return { provider: 'gemini', title, outputFilename }
+    return { provider: 'gemini', title, outputFilename: filenameFromTitle(title) }
   } catch (error) {
     console.warn('[naming] Falling back to mock:', error)
     return mockNaming(input.originalFilename, input.mode)

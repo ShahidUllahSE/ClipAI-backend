@@ -9,6 +9,7 @@ import {
   CROP_PRESETS,
   EDITING_MODES,
   KEYFRAME_PRESETS,
+  ZOOM_EFFECTS,
   PACING_LEVELS,
   SILENCE_LEVELS,
   SPEED_RAMPS,
@@ -32,6 +33,7 @@ export const projectOptionsSchema = z.object({
   speedRamp: z.enum(SPEED_RAMPS),
   keyframing: z.boolean(),
   keyframePreset: z.enum(KEYFRAME_PRESETS),
+  zoomEffect: z.enum(ZOOM_EFFECTS).optional().default('none'),
   keepAudio: z.boolean(),
   audioNormalize: z.boolean(),
   cropPreset: z.enum(CROP_PRESETS).default('none'),
@@ -46,6 +48,7 @@ export const createProjectSchema = z
   .object({
     uploadId: z.string().min(1),
     secondaryUploadId: z.string().min(1).optional(),
+    extraUploadIds: z.array(z.string().min(1)).max(9).optional(),
     mode: z.enum(EDITING_MODES),
     options: projectOptionsSchema,
     title: z.string().trim().max(120).optional(),
@@ -60,6 +63,10 @@ export const createProjectSchema = z
       })
     }
   })
+
+export const bulkDownloadSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(10).optional(),
+})
 
 export const updateProjectSchema = z
   .object({

@@ -11,14 +11,21 @@ import {
   makeTempSibling,
 } from '../../integrations/export-polish.service'
 import { prepareExportCaptionsSrt } from '../../integrations/caption-transcribe.service'
-import { probeDuration, type ClipMotion } from '../../integrations/ffmpeg'
+import {
+  concatSourceVideos,
+  probeDuration,
+  type ClipMotion,
+} from '../../integrations/ffmpeg'
 import { hasZoomKeyframes } from '../../integrations/timeline-fx'
 import {
   planBeautifulCombine,
   renderHighlightCombine,
 } from '../../integrations/ai-combine.service'
 import { analyzeVideoUnderstanding } from '../../integrations/understanding.service'
-import { generateProjectName } from '../../integrations/naming.service'
+import {
+  filenameFromTitle,
+  generateProjectName,
+} from '../../integrations/naming.service'
 import { renderEditedVideo } from '../../integrations/render.service'
 import { analyzeSpeech } from '../../integrations/speech.service'
 import { UploadModel } from '../upload/upload.model'
@@ -70,6 +77,7 @@ function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
     speedRamp: raw.speedRamp ?? 'light',
     keyframing: raw.keyframing ?? true,
     keyframePreset: raw.keyframePreset ?? 'speaker-punch-in',
+    zoomEffect: raw.zoomEffect ?? 'none',
     keepAudio: raw.keepAudio ?? true,
     audioNormalize: raw.audioNormalize ?? true,
     cropPreset: raw.cropPreset ?? 'center',
@@ -173,15 +181,60 @@ function unlinkQuiet(filePath?: string) {
   }
 }
 
+async function resolveInputPath(
+  project: {
+    extraUploadIds?: Array<{ toString(): string }> | null
+    durationSeconds: number
+  },
+  upload: { storagePath: string },
+  outputPath: string,
+): Promise<{ inputPath: string; durationSeconds: number; joinedPath?: string }> {
+  const ids = (project.extraUploadIds ?? []).map((id) => id.toString()).filter(Boolean)
+  if (!ids.length) {
+    return {
+      inputPath: upload.storagePath,
+      durationSeconds: project.durationSeconds,
+    }
+  }
+
+  const extras = await UploadModel.find({ _id: { $in: ids } })
+  const byId = new Map(extras.map((item) => [item._id.toString(), item]))
+  const paths = [upload.storagePath]
+  for (const id of ids) {
+    const extra = byId.get(id)
+    if (!extra?.storagePath || !fs.existsSync(extra.storagePath)) {
+      throw new Error(
+        'One of the joined clips is missing. Upload the files again.',
+      )
+    }
+    paths.push(extra.storagePath)
+  }
+
+  const joinedPath = makeTempSibling(outputPath, 'joined')
+  await concatSourceVideos(paths, joinedPath)
+  const durationSeconds =
+    (await probeDuration(joinedPath).catch(() => 0)) || project.durationSeconds
+  return { inputPath: joinedPath, durationSeconds, joinedPath }
+}
+
 function clipMotionFromTimeline(
   timelineJson: unknown,
-  options?: { keyframing?: boolean; keyframePreset?: string },
+  options?: {
+    keyframing?: boolean
+    keyframePreset?: string
+    zoomEffect?: string
+  },
 ): ClipMotion {
   const json = timelineJson as {
     timeline?: { transition?: { type?: string } | null }
     output?: { transition?: { type?: string } | null }
   } | null
-  const type = json?.timeline?.transition?.type ?? json?.output?.transition?.type
+  const fromTimeline =
+    json?.timeline?.transition?.type ?? json?.output?.transition?.type
+  const type =
+    fromTimeline && fromTimeline !== 'none'
+      ? fromTimeline
+      : (options?.zoomEffect ?? fromTimeline)
   if (
     type === 'zoom-in' ||
     type === 'zoom-out' ||
@@ -394,7 +447,9 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       }
       project.generatedTitle = naming.title || plan.titleHint
       project.title = naming.title || plan.titleHint
-      project.outputFilename = naming.outputFilename
+      project.outputFilename = filenameFromTitle(
+        naming.title || plan.titleHint,
+      )
       project.durationSeconds = polishDuration
 
       if (!project.creditCharged) {
@@ -448,19 +503,22 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       )
       const cutPath = makeTempSibling(outputPath, 'cut')
       const outputUrl = `${env.PUBLIC_API_URL}/uploads/outputs/${outputName}`
+      const source = await resolveInputPath(project, upload, outputPath)
 
       await setStatus(
         projectId,
         jobId,
         'Preparing edit',
-        'Building speech keep-segments',
+        source.joinedPath
+          ? 'Joining clips, then building speech keep-segments'
+          : 'Building speech keep-segments',
       )
 
       await setStatus(projectId, jobId, 'Rendering', 'Cutting silence with FFmpeg')
 
       const writeProgress = createProgressWriter(projectId)
       const result = await processTalkingHead({
-        inputPath: upload.storagePath,
+        inputPath: source.inputPath,
         outputPath: cutPath,
         outputUrl,
         silenceSensitivity: options.silenceSensitivity,
@@ -468,7 +526,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         speedRamp: options.speedRamp,
         captions: Boolean(options.captions),
         captionOptions: options,
-        durationSeconds: project.durationSeconds,
+        durationSeconds: source.durationSeconds,
         motion: clipMotionFromTimeline(options.timelineJson, options),
         timelineJson: options.timelineJson,
         aspectRatio: options.aspectRatio,
@@ -587,6 +645,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       unlinkQuiet(cutPath)
       unlinkQuiet(result.captionsPath)
       unlinkQuiet(exportCaptionsPath)
+      unlinkQuiet(source.joinedPath)
 
       const allNotes = [...result.notes, ...polishNotes]
       const polish = { notes: polishNotes, durationSeconds: polishDuration }
@@ -628,7 +687,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       }
       project.generatedTitle = naming.title
       project.title = naming.title
-      project.outputFilename = naming.outputFilename
+      project.outputFilename = filenameFromTitle(naming.title)
       if (result.durationSeconds > 0) {
         project.durationSeconds = result.durationSeconds
       }
@@ -684,12 +743,15 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       )
       const cutPath = makeTempSibling(outputPath, 'cut')
       const outputUrl = `${env.PUBLIC_API_URL}/uploads/outputs/${outputName}`
+      const source = await resolveInputPath(project, upload, outputPath)
 
       await setStatus(
         projectId,
         jobId,
         'Preparing edit',
-        'Keeping sound & reveal moments',
+        source.joinedPath
+          ? 'Joining clips, then keeping sound & reveal moments'
+          : 'Keeping sound & reveal moments',
       )
       await setStatus(
         projectId,
@@ -700,7 +762,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       const writeProgress = createProgressWriter(projectId)
       const result = await processAsmrUnboxing({
-        inputPath: upload.storagePath,
+        inputPath: source.inputPath,
         outputPath: cutPath,
         outputUrl,
         originalFilename: project.originalFilename,
@@ -708,7 +770,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         pacing: options.pacing,
         keepAudio: options.keepAudio,
         speedRamp: options.speedRamp,
-        durationSeconds: project.durationSeconds,
+        durationSeconds: source.durationSeconds,
         timelineJson: options.timelineJson,
         motion: clipMotionFromTimeline(options.timelineJson, options),
         onProgress: writeProgress,
@@ -771,6 +833,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       unlinkQuiet(cutPath)
       unlinkQuiet(exportCaptionsPath)
+      unlinkQuiet(source.joinedPath)
 
       const allNotes = [...result.notes, ...polishNotes]
       const polish = { notes: polishNotes, durationSeconds: polishDuration }
@@ -817,7 +880,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       }
       project.generatedTitle = naming.title
       project.title = naming.title
-      project.outputFilename = naming.outputFilename
+      project.outputFilename = filenameFromTitle(naming.title)
       if (result.durationSeconds > 0) {
         project.durationSeconds = result.durationSeconds
       }
@@ -873,12 +936,15 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       )
       const cutPath = makeTempSibling(outputPath, 'cut')
       const outputUrl = `${env.PUBLIC_API_URL}/uploads/outputs/${outputName}`
+      const source = await resolveInputPath(project, upload, outputPath)
 
       await setStatus(
         projectId,
         jobId,
         'Preparing edit',
-        'Keeping high-energy moments',
+        source.joinedPath
+          ? 'Joining clips, then keeping high-energy moments'
+          : 'Keeping high-energy moments',
       )
       await setStatus(
         projectId,
@@ -889,7 +955,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
 
       const writeProgress = createProgressWriter(projectId)
       const result = await processRapidCut({
-        inputPath: upload.storagePath,
+        inputPath: source.inputPath,
         outputPath: cutPath,
         outputUrl,
         originalFilename: project.originalFilename,
@@ -897,7 +963,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         pacing: options.pacing,
         keepAudio: options.keepAudio,
         speedRamp: options.speedRamp,
-        durationSeconds: project.durationSeconds,
+        durationSeconds: source.durationSeconds,
         motion: clipMotionFromTimeline(options.timelineJson, options),
         timelineJson: options.timelineJson,
         aspectRatio: options.aspectRatio,
@@ -963,6 +1029,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       unlinkQuiet(cutPath)
       unlinkQuiet(result.captionsPath)
       unlinkQuiet(exportCaptionsPath)
+      unlinkQuiet(source.joinedPath)
 
       const allNotes = [...result.notes, ...polishNotes]
       const polish = { notes: polishNotes, durationSeconds: polishDuration }
@@ -1009,7 +1076,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
       }
       project.generatedTitle = naming.title
       project.title = naming.title
-      project.outputFilename = naming.outputFilename
+      project.outputFilename = filenameFromTitle(naming.title)
       if (result.durationSeconds > 0) {
         project.durationSeconds = result.durationSeconds
       }
@@ -1076,7 +1143,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
     project.editPlan = editPlan
     project.generatedTitle = naming.title
     project.title = naming.title
-    project.outputFilename = naming.outputFilename
+    project.outputFilename = filenameFromTitle(naming.title)
     await project.save()
 
     await setStatus(projectId, jobId, 'Rendering', 'Rendering output MP4')

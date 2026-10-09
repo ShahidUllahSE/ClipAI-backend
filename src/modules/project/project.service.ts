@@ -1,4 +1,7 @@
+import fs from 'fs'
+import path from 'path'
 import { Types } from 'mongoose'
+import { env } from '../../config'
 import { HTTP_STATUS } from '../../constants/http'
 import {
   ACTIVE_PROCESS_STATUSES,
@@ -15,6 +18,8 @@ import {
 import { ProjectModel } from './project.model'
 import type { ProjectOptionsDto, PublicProject } from './project.types'
 
+const BULK_DOWNLOAD_MAX = 10
+
 function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
   return {
     captions: raw.captions ?? true,
@@ -28,6 +33,7 @@ function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
     speedRamp: raw.speedRamp ?? 'light',
     keyframing: raw.keyframing ?? true,
     keyframePreset: raw.keyframePreset ?? 'speaker-punch-in',
+    zoomEffect: raw.zoomEffect ?? 'none',
     keepAudio: raw.keepAudio ?? true,
     audioNormalize: raw.audioNormalize ?? true,
     cropPreset: raw.cropPreset ?? 'center',
@@ -62,6 +68,7 @@ export const projectService = {
     input: {
       uploadId: string
       secondaryUploadId?: string
+      extraUploadIds?: string[]
       mode: EditingModeId
       options: ProjectOptionsDto
       title?: string
@@ -73,6 +80,11 @@ export const projectService = {
       input.secondaryUploadId
         ? await uploadService.getOwned(input.secondaryUploadId, userId)
         : null
+    const extraUploads = input.extraUploadIds?.length
+      ? await Promise.all(
+          input.extraUploadIds.map((id) => uploadService.getOwned(id, userId)),
+        )
+      : []
 
     if (input.mode === 'ai-combine' && !secondary) {
       throw new AppError(
@@ -81,10 +93,20 @@ export const projectService = {
       )
     }
 
+    const extraDuration = extraUploads.reduce(
+      (sum, item) => sum + (item.durationSeconds || 0),
+      0,
+    )
+    const extraSize = extraUploads.reduce(
+      (sum, item) => sum + (item.fileSize || 0),
+      0,
+    )
     const durationSeconds =
       input.durationSeconds && input.durationSeconds > 0
         ? input.durationSeconds
-        : upload.durationSeconds + (secondary?.durationSeconds ?? 0)
+        : upload.durationSeconds +
+          (secondary?.durationSeconds ?? 0) +
+          extraDuration
 
     if (input.durationSeconds && input.durationSeconds > 0) {
       upload.durationSeconds = input.durationSeconds
@@ -99,11 +121,14 @@ export const projectService = {
       userId,
       uploadId: upload._id,
       secondaryUploadId: secondary?._id ?? null,
+      extraUploadIds: extraUploads.map((item) => item._id),
       title: generatedTitle,
-      originalFilename: secondary
-        ? `${upload.originalFilename} + ${secondary.originalFilename}`
-        : upload.originalFilename,
-      fileSize: upload.fileSize + (secondary?.fileSize ?? 0),
+      originalFilename: extraUploads.length
+        ? [upload, ...extraUploads].map((item) => item.originalFilename).join(' + ')
+        : secondary
+          ? `${upload.originalFilename} + ${secondary.originalFilename}`
+          : upload.originalFilename,
+      fileSize: upload.fileSize + (secondary?.fileSize ?? 0) + extraSize,
       durationSeconds,
       mimeType: upload.mimeType,
       mode: input.mode,
@@ -135,7 +160,12 @@ export const projectService = {
       project.title = input.generatedTitle
       project.outputFilename = suggestFilename(input.generatedTitle)
     }
-    if (input.title) project.title = input.title
+    if (input.title) {
+      project.title = input.title
+      if (!input.outputFilename && !input.generatedTitle) {
+        project.outputFilename = suggestFilename(input.title)
+      }
+    }
     if (input.outputFilename) project.outputFilename = input.outputFilename
 
     await project.save()
@@ -161,5 +191,85 @@ export const projectService = {
     const project = await ProjectModel.findOne(query)
     if (!project) throw new AppError('Project not found.', HTTP_STATUS.NOT_FOUND)
     return project
+  },
+
+  async getDownloadFile(id: string, userId: string) {
+    const project = await this.getDocument(id, userId)
+    if (project.status !== 'Completed') {
+      throw new AppError(
+        'Edited file is not ready yet.',
+        HTTP_STATUS.BAD_REQUEST,
+      )
+    }
+    const filePath = path.resolve(
+      process.cwd(),
+      env.UPLOAD_DIR,
+      'outputs',
+      `${project._id.toString()}.mp4`,
+    )
+    if (!fs.existsSync(filePath)) {
+      throw new AppError(
+        'Edited file is not available on this server.',
+        HTTP_STATUS.NOT_FOUND,
+      )
+    }
+    return {
+      filePath,
+      filename: project.outputFilename || 'export.mp4',
+    }
+  },
+
+  async getBulkDownloadFiles(userId: string, ids?: string[]) {
+    const query: Record<string, unknown> = {
+      userId,
+      status: 'Completed',
+    }
+    if (ids?.length) {
+      query._id = { $in: ids.filter((id) => Types.ObjectId.isValid(id)) }
+    }
+
+    const projects = await ProjectModel.find(query)
+      .sort({ createdAt: -1 })
+      .limit(BULK_DOWNLOAD_MAX)
+      .lean()
+
+    if (!projects.length) {
+      throw new AppError(
+        'No finished videos are ready to download.',
+        HTTP_STATUS.NOT_FOUND,
+      )
+    }
+
+    const used = new Set<string>()
+    const files: Array<{ name: string; path: string }> = []
+    for (const project of projects) {
+      const filePath = path.resolve(
+        process.cwd(),
+        env.UPLOAD_DIR,
+        'outputs',
+        `${project._id.toString()}.mp4`,
+      )
+      if (!fs.existsSync(filePath)) continue
+      let name = String(project.outputFilename || 'export.mp4')
+      if (!name.toLowerCase().endsWith('.mp4')) name = `${name}.mp4`
+      const base = name.replace(/\.mp4$/i, '')
+      let unique = name
+      let n = 2
+      while (used.has(unique.toLowerCase())) {
+        unique = `${base}-${n}.mp4`
+        n += 1
+      }
+      used.add(unique.toLowerCase())
+      files.push({ name: unique, path: filePath })
+    }
+
+    if (!files.length) {
+      throw new AppError(
+        'Finished videos are not on this server yet.',
+        HTTP_STATUS.NOT_FOUND,
+      )
+    }
+
+    return files
   },
 }
