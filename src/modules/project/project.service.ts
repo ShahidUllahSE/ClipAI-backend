@@ -18,7 +18,7 @@ import {
 import { ProjectModel } from './project.model'
 import type { ProjectOptionsDto, PublicProject } from './project.types'
 
-const BULK_DOWNLOAD_MAX = 10
+const BULK_DOWNLOAD_MAX = 20
 
 function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
   return {
@@ -220,18 +220,28 @@ export const projectService = {
   },
 
   async getBulkDownloadFiles(userId: string, ids?: string[]) {
+    const requested = (ids ?? [])
+      .filter((id) => Types.ObjectId.isValid(id))
+      .slice(0, BULK_DOWNLOAD_MAX)
+
     const query: Record<string, unknown> = {
       userId,
       status: 'Completed',
     }
-    if (ids?.length) {
-      query._id = { $in: ids.filter((id) => Types.ObjectId.isValid(id)) }
-    }
+    if (requested.length) query._id = { $in: requested }
 
-    const projects = await ProjectModel.find(query)
+    const found = await ProjectModel.find(query)
       .sort({ createdAt: -1 })
       .limit(BULK_DOWNLOAD_MAX)
       .lean()
+
+    const byId = new Map(found.map((project) => [project._id.toString(), project]))
+    const projects = requested.length
+      ? requested.flatMap((id) => {
+          const item = byId.get(id)
+          return item ? [item] : []
+        })
+      : found
 
     if (!projects.length) {
       throw new AppError(
