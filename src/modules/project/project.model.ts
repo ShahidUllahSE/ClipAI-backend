@@ -51,7 +51,7 @@ const optionsSchema = {
   },
   keepAudio: { type: Boolean, default: true },
   audioNormalize: { type: Boolean, default: true },
-  cropPreset: { type: String, enum: CROP_PRESETS, default: 'none' },
+  cropPreset: { type: String, enum: CROP_PRESETS, default: 'center' },
   colorGrade: { type: String, enum: COLOR_GRADES, default: 'clean' },
   fadeInOut: { type: Boolean, default: true },
   mirrorHorizontal: { type: Boolean, default: false },

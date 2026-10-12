@@ -9,6 +9,7 @@ import {
   type ProjectStatus,
 } from '../../constants/projects'
 import { AppError } from '../../utils/AppError'
+import { filenameFromTitle } from '../../integrations/naming.service'
 import { uploadService } from '../upload/upload.service'
 import {
   suggestFilename,
@@ -215,7 +216,9 @@ export const projectService = {
     }
     return {
       filePath,
-      filename: project.outputFilename || 'export.mp4',
+      filename: filenameFromTitle(
+        project.generatedTitle || project.title || project.outputFilename || 'export',
+      ),
     }
   },
 
@@ -260,7 +263,14 @@ export const projectService = {
         `${project._id.toString()}.mp4`,
       )
       if (!fs.existsSync(filePath)) continue
-      let name = String(project.outputFilename || 'export.mp4')
+      let name = filenameFromTitle(
+        String(
+          project.generatedTitle ||
+            project.title ||
+            project.outputFilename ||
+            'export',
+        ),
+      )
       if (!name.toLowerCase().endsWith('.mp4')) name = `${name}.mp4`
       const base = name.replace(/\.mp4$/i, '')
       let unique = name

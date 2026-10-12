@@ -17,20 +17,41 @@ function slugify(text: string) {
 }
 
 export function filenameFromTitle(title: string) {
-  return `${slugify(title) || 'export'}.mp4`
+  const cleaned = String(title || '')
+    .replace(/\.mp4$/i, '')
+    .trim()
+  return `${slugify(cleaned) || 'export'}.mp4`
 }
 
-function mockNaming(filename: string, mode: EditingModeId): NamingResult {
-  const base = filename.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ')
-  const modeLabel =
-    mode === 'talking-head'
-      ? 'Talking Head'
-      : mode === 'rapid-cut'
-        ? 'Rapid Cut'
-        : mode === 'ai-combine'
-          ? 'AI Combine'
-          : 'ASMR Unboxing'
-  const title = `${base || 'Untitled'} — ${modeLabel}`.slice(0, 80)
+function modeLabel(mode: EditingModeId) {
+  if (mode === 'talking-head') return 'Talking Head'
+  if (mode === 'rapid-cut') return 'Rapid Cut'
+  if (mode === 'ai-combine') return 'AI Combine'
+  return 'ASMR Unboxing'
+}
+
+function titleFromTranscript(transcript?: string, filename?: string) {
+  const spoken = (transcript || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 8)
+    .join(' ')
+  if (spoken.length >= 12) return spoken.slice(0, 70)
+  const base = (filename || '')
+    .replace(/\.[^.]+$/, '')
+    .replace(/[-_]+/g, ' ')
+    .trim()
+  return (base || 'Untitled clip').slice(0, 70)
+}
+
+function mockNaming(
+  filename: string,
+  mode: EditingModeId,
+  transcript?: string,
+): NamingResult {
+  const title = titleFromTranscript(transcript, filename)
   return {
     provider: 'mock',
     title,
@@ -44,33 +65,43 @@ export async function generateProjectName(input: {
   transcript?: string
   summary?: string
 }): Promise<NamingResult> {
-  if (env.mockAi || env.fastExport || !env.GEMINI_API_KEY) {
-    return mockNaming(input.originalFilename, input.mode)
+  if (!env.GEMINI_API_KEY) {
+    return mockNaming(input.originalFilename, input.mode, input.transcript)
   }
 
   try {
     const prompt = [
-      'Generate a short social-video title and sanitized mp4 filename.',
-      'Return JSON only: { "title": string, "outputFilename": string }',
-      `Mode: ${input.mode}`,
-      `Filename: ${input.originalFilename}`,
-      input.summary ? `Summary: ${input.summary}` : '',
-      input.transcript ? `Transcript: ${input.transcript.slice(0, 500)}` : '',
-    ].join('\n')
+      'Create a short catchy title for this edited social video.',
+      'Do not copy the original file name. Use the transcript/summary.',
+      '4 to 8 words. No quotes. No hashtags.',
+      'Return JSON only: { "title": string }',
+      `Mode: ${input.mode} (${modeLabel(input.mode)})`,
+      input.summary ? `Summary: ${input.summary.slice(0, 400)}` : '',
+      input.transcript ? `Transcript: ${input.transcript.slice(0, 800)}` : '',
+      `Original file (do not reuse): ${input.originalFilename}`,
+    ]
+      .filter(Boolean)
+      .join('\n')
 
     const text = await geminiGenerateText(prompt)
-    const parsed = extractJsonObject<{
-      title?: string
-      outputFilename?: string
-    }>(text)
-    const title = (parsed.title || 'Untitled Clip').slice(0, 80)
+    let title = ''
+    try {
+      const parsed = extractJsonObject<{ title?: string }>(text)
+      title = String(parsed.title || '').trim()
+    } catch {
+      title = text.replace(/["`]/g, ' ').replace(/\s+/g, ' ').trim()
+    }
+    title = title
+      .replace(/^title\s*:\s*/i, '')
+      .replace(/\.mp4$/i, '')
+      .slice(0, 80)
+      .trim()
+    if (title.length < 3) {
+      title = titleFromTranscript(input.transcript, input.originalFilename)
+    }
     return { provider: 'gemini', title, outputFilename: filenameFromTitle(title) }
   } catch (error) {
-    console.warn('[naming] Falling back to mock:', error)
-    return mockNaming(input.originalFilename, input.mode)
+    console.warn('[naming] Falling back:', error)
+    return mockNaming(input.originalFilename, input.mode, input.transcript)
   }
-}
-
-function delay(ms: number) {
-  return new Promise((r) => setTimeout(r, ms))
 }

@@ -36,7 +36,7 @@ export const projectOptionsSchema = z.object({
   zoomEffect: z.enum(ZOOM_EFFECTS).optional().default('none'),
   keepAudio: z.boolean(),
   audioNormalize: z.boolean(),
-  cropPreset: z.enum(CROP_PRESETS).default('none'),
+  cropPreset: z.enum(CROP_PRESETS).default('center'),
   colorGrade: z.enum(COLOR_GRADES).default('clean'),
   fadeInOut: z.boolean().default(true),
   mirrorHorizontal: z.boolean().default(false),

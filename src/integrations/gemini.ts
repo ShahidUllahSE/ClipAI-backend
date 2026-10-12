@@ -12,7 +12,15 @@ const GEMINI_AUDIO_MODELS = [
   'gemini-flash-latest',
 ]
 
-const GEMINI_TIMEOUT_MS = 8_000
+const GEMINI_TEXT_MODELS = [
+  GEMINI_MODEL,
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-flash-latest',
+  'gemini-3.5-flash',
+]
+
+const GEMINI_TIMEOUT_MS = 15_000
 const GEMINI_VISION_TIMEOUT_MS = 45_000
 const GEMINI_AUDIO_TIMEOUT_MS = 120_000
 
@@ -27,22 +35,21 @@ export function isBusyGeminiError(error: unknown): boolean {
   )
 }
 
-export async function geminiGenerateText(prompt: string): Promise<string> {
-  if (!env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is not set')
-  }
-
+async function geminiGenerateTextOnce(prompt: string, model: string): Promise<string> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS)
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.6,
+          },
         }),
         signal: controller.signal,
       },
@@ -55,10 +62,40 @@ export async function geminiGenerateText(prompt: string): Promise<string> {
     const data = (await response.json()) as {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
     }
-    return data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+    if (!text.trim()) throw new Error(`Gemini ${model} returned empty text`)
+    return text
   } finally {
     clearTimeout(timer)
   }
+}
+
+export async function geminiGenerateText(prompt: string): Promise<string> {
+  if (!env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is not set')
+  }
+
+  let lastError: unknown
+  for (let i = 0; i < GEMINI_TEXT_MODELS.length; i++) {
+    try {
+      return await geminiGenerateTextOnce(prompt, GEMINI_TEXT_MODELS[i])
+    } catch (error) {
+      lastError = error
+      if (!isBusyGeminiError(error) && i === 0) {
+        // Keep trying other models for 404/not found; abort only on auth errors.
+        const raw = error instanceof Error ? error.message : String(error)
+        if (/api key|permission|401|403|invalid/i.test(raw) && !/not found/i.test(raw)) {
+          throw error
+        }
+      }
+      if (i === GEMINI_TEXT_MODELS.length - 1) break
+      await delay(400 * (i + 1))
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Gemini text request failed.')
 }
 
 export async function geminiGenerateWithImages(
