@@ -740,6 +740,16 @@ function motionScaleCrop(
     return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,crop=${w}:${h}:${xExpr}:${yExpr},setsar=1`
   }
 
+  /** Snap punch-in on every cut — short and obvious, not a static crop. */
+  const applyPunch = (fx: number, fy: number) => {
+    const punchDur = Math.max(0.22, Math.min(0.45, duration * 0.35)).toFixed(3)
+    const a = Math.max(1, 1 * zMul)
+    const b = Math.max(a + 0.22, 1.38 * zMul)
+    const crop = `crop=${w}:${h}:${cropAround(fx, fy)}`
+    const zExpr = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,t/${punchDur})`
+    return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,${crop},setsar=1`
+  }
+
   if (motion === 'none' || motion === 'random') return apply(1, 0.5, 0.5)
 
   // Portrait source: overall = the original 9:16 frame. Do not pan.
@@ -747,9 +757,7 @@ function motionScaleCrop(
     if (motion === 'zoom-in') return applyLive(1, 1.42, 0.5, 0.5)
     if (motion === 'zoom-out') return applyLive(1.48, 1, 0.5, 0.5)
     if (motion === 'ken-burns') return applyKenBurns(0.58, 0.38)
-    if (motion === 'punch') {
-      return shot === 'wide' ? apply(1, 0.5, 0.5) : apply(1.18, 0.5, 0.46)
-    }
+    if (motion === 'punch') return applyPunch(0.5, 0.46)
     if (motion === 'fade') {
       const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
       const base = apply(1, 0.5, 0.5)
@@ -786,9 +794,7 @@ function motionScaleCrop(
   if (motion === 'zoom-in') return applyLive(1, 1.42, speaker.x, 0.5)
   if (motion === 'zoom-out') return applyLive(1.48, 1, scene.x, 0.5)
   if (motion === 'ken-burns') return applyKenBurns(speaker.x, speaker.y)
-  if (motion === 'punch') {
-    return shot === 'wide' ? apply(1, scene.x, 0.5) : apply(1.22, speaker.x, 0.5)
-  }
+  if (motion === 'punch') return applyPunch(speaker.x, speaker.y)
   if (motion === 'fade') {
     const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
     const base = apply(1, scene.x, 0.5)
