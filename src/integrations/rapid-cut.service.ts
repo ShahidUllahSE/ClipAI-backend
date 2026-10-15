@@ -19,6 +19,7 @@ import {
   tightenWordsToSpeech,
   trimNonSpeechFromCuts,
 } from './speech-activity'
+import { removeRetakes } from './retake-removal'
 import {
   extraZoomByCutFromTimeline,
   perCutMotionsFromTimeline,
@@ -781,8 +782,13 @@ export async function processRapidCut(input: {
         (sum, word) => sum + Math.max(0, word.end - word.start),
         0,
       )
+      // Always keep transcript words for retake cleanup, even on energy path.
+      if (compact.length >= 4) {
+        transcriptWords = compact
+        rawTranscriptWords = stt.words
+      }
       const speechHeavy =
-        compact.length >= 12 && spokenSpan >= Math.min(8, duration * 0.12)
+        compact.length >= 8 && spokenSpan >= Math.min(5, duration * 0.08)
       if (speechHeavy) {
         let spokenCuts = transcriptKeepCuts(stt.words, stt.phrases, duration)
         if (spokenCuts.length >= 2) {
@@ -829,21 +835,22 @@ export async function processRapidCut(input: {
               compact,
               duration,
             )
-            spokenCuts = dropRepeatedTakes(spokenCuts, compact)
-            if (spokenCuts.length < 2) spokenCuts = leftoverClean
+            const retakePass = await removeRetakes({
+              cuts: spokenCuts,
+              words: compact,
+              durationSeconds: duration,
+              inputPath: input.inputPath,
+            })
+            spokenCuts = retakePass.cuts
+            if (spokenCuts.length < 1) spokenCuts = leftoverClean
             spokenCuts = clampCutsToSpokenWords(
               spokenCuts,
               compact,
               duration,
             )
-            spokenCuts = await dropClosingRetake(
-              spokenCuts,
-              compact,
-              duration,
-              input.inputPath,
-            )
             spokenCuts = mergeOverlappingCuts(spokenCuts)
-            if (spokenCuts.length < 2) spokenCuts = leftoverClean
+            if (spokenCuts.length < 1) spokenCuts = leftoverClean
+            if (retakePass.notes.length) notes.push(...retakePass.notes)
             baseCuts = spokenCuts
             keep = totalKeep(baseCuts)
             method = 'transcript-cuts'
@@ -885,12 +892,16 @@ export async function processRapidCut(input: {
         transcriptWords,
         duration,
       )
-      baseCuts = await dropClosingRetake(
-        baseCuts,
-        transcriptWords,
-        duration,
-        input.inputPath,
-      )
+      {
+        const retakePass = await removeRetakes({
+          cuts: baseCuts,
+          words: transcriptWords,
+          durationSeconds: duration,
+          inputPath: input.inputPath,
+        })
+        baseCuts = retakePass.cuts
+        if (retakePass.notes.length) notes.push(...retakePass.notes)
+      }
       baseCuts = mergeOverlappingCuts(baseCuts)
       try {
         report(74, 'Removing non-speech sounds')
@@ -945,6 +956,30 @@ export async function processRapidCut(input: {
     }
   }
   keep = totalKeep(baseCuts)
+
+  // Always strip retakes when we have a transcript, including energy-peak path.
+  if (transcriptWords.length >= 4 && baseCuts.length >= 1) {
+    try {
+      report(75, 'Removing retakes')
+      const retakePass = await removeRetakes({
+        cuts: baseCuts,
+        words: transcriptWords,
+        durationSeconds: duration,
+        inputPath: input.inputPath,
+      })
+      if (retakePass.cuts.length) {
+        baseCuts = retakePass.cuts
+        keep = totalKeep(baseCuts)
+        if (retakePass.notes.length) notes.push(...retakePass.notes)
+      }
+    } catch (error) {
+      notes.push(
+        `Retake pass skipped: ${
+          error instanceof Error ? error.message.slice(0, 120) : 'unknown'
+        }`,
+      )
+    }
+  }
 
   notes.push(
     `Keeping ${baseCuts.length} clips via ${method} (${input.pacing} pacing)`,

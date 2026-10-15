@@ -550,11 +550,14 @@ export type ClipMotion =
   | 'zoom-in'
   | 'zoom-out'
   | 'ken-burns'
+  | 'random'
   | 'fade'
   | 'slide-left'
   | 'slide-right'
   | 'blur'
   | 'flash'
+
+const RANDOM_ZOOM_POOL: ClipMotion[] = ['zoom-in', 'zoom-out', 'ken-burns']
 
 export type SubjectFocus = { x: number; y: number }
 
@@ -721,23 +724,26 @@ function motionScaleCrop(
   }
 
   const applyKenBurns = (fx: number, fy: number) => {
-    const a = Math.max(1.04, 1.04 * zMul)
-    const b = Math.max(a + 0.18, 1.36 * zMul)
-    const px = (Math.min(0.78, Math.max(0.22, fx)) - 0.5).toFixed(3)
-    const py = (Math.min(0.7, Math.max(0.3, fy)) - 0.5).toFixed(3)
+    const a = Math.max(1.08, 1.08 * zMul)
+    const b = Math.max(a + 0.28, 1.52 * zMul)
+    const px = (Math.min(0.82, Math.max(0.18, fx)) - 0.5).toFixed(3)
+    const py = (Math.min(0.72, Math.max(0.28, fy)) - 0.5).toFixed(3)
     const zExpr = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,t/${d})`
     const xExpr = `(iw-ow)/2+(iw-ow)*${px}*min(1\\,t/${d})`
     const yExpr = `(ih-oh)/2+(ih-oh)*${py}*min(1\\,t/${d})`
-    return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,crop=${w}:${h}:'${xExpr}':'${yExpr}',setsar=1`
+    return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,crop=${w}:${h}:${xExpr}:${yExpr},setsar=1`
   }
 
-  if (motion === 'none') return apply(1, 0.5, 0.5)
+  if (motion === 'none' || motion === 'random') return apply(1, 0.5, 0.5)
 
   // Portrait source: overall = the original 9:16 frame. Do not pan.
   if (portrait) {
-    if (motion === 'zoom-in') return applyLive(1, 1.28, 0.5, 0.5)
-    if (motion === 'zoom-out') return applyLive(1.32, 1, 0.5, 0.5)
-    if (motion === 'ken-burns') return applyKenBurns(0.62, 0.4)
+    if (motion === 'zoom-in') return applyLive(1, 1.42, 0.5, 0.5)
+    if (motion === 'zoom-out') return applyLive(1.48, 1, 0.5, 0.5)
+    if (motion === 'ken-burns') return applyKenBurns(0.58, 0.38)
+    if (motion === 'punch') {
+      return shot === 'wide' ? apply(1, 0.5, 0.5) : apply(1.18, 0.5, 0.46)
+    }
     if (motion === 'fade') {
       const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
       const base = apply(1, 0.5, 0.5)
@@ -771,11 +777,11 @@ function motionScaleCrop(
     y: 0.5,
   }
 
-  if (motion === 'zoom-in') return applyLive(1, 1.28, speaker.x, 0.5)
-  if (motion === 'zoom-out') return applyLive(1.32, 1, scene.x, 0.5)
+  if (motion === 'zoom-in') return applyLive(1, 1.42, speaker.x, 0.5)
+  if (motion === 'zoom-out') return applyLive(1.48, 1, scene.x, 0.5)
   if (motion === 'ken-burns') return applyKenBurns(speaker.x, speaker.y)
   if (motion === 'punch') {
-    return shot === 'wide' ? apply(1, scene.x, 0.5) : apply(1.12, speaker.x, 0.5)
+    return shot === 'wide' ? apply(1, scene.x, 0.5) : apply(1.22, speaker.x, 0.5)
   }
   if (motion === 'fade') {
     const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
@@ -1017,7 +1023,8 @@ export async function renderJumpCutVideo(input: {
 
   const hasAudio = await probeHasAudio(input.inputPath)
   const useAudio = input.keepAudio && hasAudio
-  const motion = input.motion ?? 'none'
+  let motion = input.motion ?? 'none'
+  let perCutMotions = input.perCutMotions
 
   const cuts = input.cuts
     .map((c) => ({
@@ -1032,6 +1039,15 @@ export async function renderJumpCutVideo(input: {
     return
   }
 
+  if (motion === 'random' || perCutMotions?.some((item) => item === 'random')) {
+    perCutMotions = cuts.map(
+      () =>
+        RANDOM_ZOOM_POOL[Math.floor(Math.random() * RANDOM_ZOOM_POOL.length)] ??
+        'zoom-in',
+    )
+    motion = perCutMotions[0] ?? 'zoom-in'
+  }
+
   const keepSeconds = cuts.reduce((sum, c) => sum + (c.end - c.start) / c.speed, 0)
   const { w, h } = targetFrame(input.aspectRatio)
   const sourceFps = await probeFrameRate(input.inputPath)
@@ -1044,7 +1060,7 @@ export async function renderJumpCutVideo(input: {
   // via JUMPCUT_BATCH_SIZE since actual headroom depends on the deploy box.
   const batchSize = env.JUMPCUT_BATCH_SIZE
   const applyMotion =
-    motion !== 'none' || Boolean(input.perCutMotions?.length) || Boolean(input.extraZoomByCut?.length)
+    motion !== 'none' || Boolean(perCutMotions?.length) || Boolean(input.extraZoomByCut?.length)
   const display = await probeDisplaySize(input.inputPath)
   const portrait = display.portrait
   const focuses =
@@ -1056,7 +1072,7 @@ export async function renderJumpCutVideo(input: {
   const batchInput = {
     inputPath: input.inputPath,
     motion,
-    perCutMotions: input.perCutMotions,
+    perCutMotions,
     extraZoomByCut: input.extraZoomByCut,
     w,
     h,

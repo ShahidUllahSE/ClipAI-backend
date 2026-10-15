@@ -29,6 +29,7 @@ function mapFx(value: unknown): ClipMotion | null {
     value === 'zoom-in' ||
     value === 'zoom-out' ||
     value === 'ken-burns' ||
+    value === 'random' ||
     value === 'fade' ||
     value === 'slide-left' ||
     value === 'slide-right' ||

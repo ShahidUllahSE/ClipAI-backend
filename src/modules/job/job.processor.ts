@@ -225,34 +225,42 @@ function clipMotionFromTimeline(
     zoomEffect?: string
   },
 ): ClipMotion {
+  // Options "Zoom effects" chips win over the editor default (which was punch).
+  const zoom = options?.zoomEffect
+  if (
+    zoom === 'zoom-in' ||
+    zoom === 'zoom-out' ||
+    zoom === 'ken-burns' ||
+    zoom === 'punch' ||
+    zoom === 'random'
+  ) {
+    return zoom
+  }
+
   const json = timelineJson as {
     timeline?: { transition?: { type?: string } | null }
     output?: { transition?: { type?: string } | null }
   } | null
   const fromTimeline =
     json?.timeline?.transition?.type ?? json?.output?.transition?.type
-  const type =
-    fromTimeline && fromTimeline !== 'none'
-      ? fromTimeline
-      : (options?.zoomEffect ?? fromTimeline)
   if (
-    type === 'zoom-in' ||
-    type === 'zoom-out' ||
-    type === 'ken-burns' ||
-    type === 'fade' ||
-    type === 'punch' ||
-    type === 'slide-left' ||
-    type === 'slide-right' ||
-    type === 'blur' ||
-    type === 'flash'
+    fromTimeline === 'zoom-in' ||
+    fromTimeline === 'zoom-out' ||
+    fromTimeline === 'ken-burns' ||
+    fromTimeline === 'fade' ||
+    fromTimeline === 'punch' ||
+    fromTimeline === 'slide-left' ||
+    fromTimeline === 'slide-right' ||
+    fromTimeline === 'blur' ||
+    fromTimeline === 'flash'
   ) {
-    return type
+    return fromTimeline
   }
   if (options?.keyframing) {
     if (options.keyframePreset === 'slow-zoom-out') return 'zoom-out'
     return 'zoom-in'
   }
-  if (type === 'none') return 'none'
+  if (zoom === 'none' || fromTimeline === 'none') return 'none'
   return 'punch'
 }
 

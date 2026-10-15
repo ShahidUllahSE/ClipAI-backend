@@ -56,6 +56,7 @@ export const ZOOM_EFFECTS = [
   'zoom-in',
   'zoom-out',
   'ken-burns',
+  'random',
 ] as const
 export type ZoomEffectId = (typeof ZOOM_EFFECTS)[number]
 export const CROP_PRESETS = [

@@ -15,6 +15,7 @@ import {
   type ClipMotion,
   type SilenceSensitivity,
 } from './ffmpeg'
+import { removeRetakes } from './retake-removal'
 import {
   extraZoomByCutFromTimeline,
   perCutMotionsFromTimeline,
@@ -376,6 +377,30 @@ export async function processTalkingHead(input: {
       notes.push(
         `Non-speech pass skipped: ${
           error instanceof Error ? error.message.slice(0, 120) : 'ffmpeg error'
+        }`,
+      )
+    }
+  }
+
+  if (speechWords.length && baseCuts.length >= 1) {
+    try {
+      report(75, 'Removing retakes')
+      const retake = await removeRetakes({
+        cuts: baseCuts,
+        words: speechWords,
+        durationSeconds: duration,
+        inputPath: input.inputPath,
+      })
+      if (retake.cuts.length) {
+        baseCuts = retake.cuts
+        keepSeconds = totalKeepSeconds(baseCuts)
+        removedSeconds = Math.max(0, duration - keepSeconds)
+        notes.push(...retake.notes)
+      }
+    } catch (error) {
+      notes.push(
+        `Retake pass skipped: ${
+          error instanceof Error ? error.message.slice(0, 120) : 'unknown'
         }`,
       )
     }
