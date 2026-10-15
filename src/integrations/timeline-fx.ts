@@ -52,7 +52,10 @@ export function hasZoomKeyframes(timelineJson: unknown): boolean {
   return Array.isArray(frames) && frames.length > 0
 }
 
-/** Same selected effect on every keep-segment. Off unless Apply to all clips was used. */
+/**
+ * Per keep-segment motions from the editor.
+ * Supports one effect on all clips, or a mixed list (Randomize on all).
+ */
 export function perCutMotionsFromTimeline(
   timelineJson: unknown,
   cutCount: number,
@@ -61,8 +64,18 @@ export function perCutMotionsFromTimeline(
   const json = asJson(timelineJson)
   const listed = json?.timeline?.clipEffects ?? json?.output?.clipEffects
   const mapped = Array.isArray(listed)
-    ? listed.map(mapFx).filter((item): item is ClipMotion => Boolean(item))
+    ? listed
+        .map(mapFx)
+        .filter((item): item is ClipMotion => Boolean(item) && item !== 'none')
     : []
+
+  if (mapped.length > 1) {
+    return Array.from(
+      { length: cutCount },
+      (_, index) => mapped[index % mapped.length] ?? mapped[0]!,
+    )
+  }
+
   const chosen =
     mapped[0] ??
     mapFx(json?.timeline?.transition?.type) ??

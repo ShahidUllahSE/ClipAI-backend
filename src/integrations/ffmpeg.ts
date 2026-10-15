@@ -557,7 +557,13 @@ export type ClipMotion =
   | 'blur'
   | 'flash'
 
-const RANDOM_ZOOM_POOL: ClipMotion[] = ['zoom-in', 'zoom-out', 'ken-burns']
+/** Client randomize pool: Punch, Zoom in, Zoom out, Ken Burns */
+const RANDOM_ZOOM_POOL: ClipMotion[] = [
+  'punch',
+  'zoom-in',
+  'zoom-out',
+  'ken-burns',
+]
 
 export type SubjectFocus = { x: number; y: number }
 
