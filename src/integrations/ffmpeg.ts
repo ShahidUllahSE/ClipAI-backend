@@ -754,7 +754,7 @@ function motionScaleCrop(
 
   // Portrait source: overall = the original 9:16 frame. Do not pan.
   if (portrait) {
-    if (motion === 'zoom-in') return applyLive(1, 1.42, 0.5, 0.5)
+    if (motion === 'zoom-in') return applyLive(1, 1.30, 0.5, 0.5)
     if (motion === 'zoom-out') return applyLive(1.48, 1, 0.5, 0.5)
     if (motion === 'ken-burns') return applyKenBurns(0.58, 0.38)
     if (motion === 'punch') return applyPunch(0.5, 0.46)
@@ -791,7 +791,7 @@ function motionScaleCrop(
     y: 0.5,
   }
 
-  if (motion === 'zoom-in') return applyLive(1, 1.42, speaker.x, 0.5)
+  if (motion === 'zoom-in') return applyLive(1, 1.30, speaker.x, 0.5)
   if (motion === 'zoom-out') return applyLive(1.48, 1, scene.x, 0.5)
   if (motion === 'ken-burns') return applyKenBurns(speaker.x, speaker.y)
   if (motion === 'punch') return applyPunch(speaker.x, speaker.y)
