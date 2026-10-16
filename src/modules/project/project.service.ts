@@ -37,6 +37,7 @@ function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
     zoomEffect: raw.zoomEffect ?? 'none',
     keepAudio: raw.keepAudio ?? true,
     audioNormalize: raw.audioNormalize ?? true,
+    removeMistakes: raw.removeMistakes ?? false,
     cropPreset: raw.cropPreset ?? 'center',
     colorGrade: raw.colorGrade ?? 'clean',
     fadeInOut: raw.fadeInOut ?? true,

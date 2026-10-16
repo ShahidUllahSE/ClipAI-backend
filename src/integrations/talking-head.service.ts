@@ -191,6 +191,8 @@ export async function processTalkingHead(input: {
   motion?: ClipMotion
   timelineJson?: unknown
   aspectRatio?: '9:16' | '1:1' | '16:9'
+  /** Opt-in flub / retake removal */
+  removeMistakes?: boolean
   onProgress?: (percent: number, note?: string) => void
 }): Promise<TalkingHeadResult> {
   const notes: string[] = ['Talking-head: remove pauses / dead air between speech']
@@ -384,16 +386,18 @@ export async function processTalkingHead(input: {
     }
   }
 
-  // Use raw STT words (not filler-stripped) so gap timing + phrase match work.
+  // Opt-in only — remove-mistakes can cut heavily when left always-on.
   const retakeWords = words.length >= 4 ? words : speechWords
-  if (retakeWords.length && baseCuts.length >= 1) {
+  if (!input.removeMistakes) {
+    notes.push('Remove mistakes: off (skipped retake pass)')
+  } else if (retakeWords.length && baseCuts.length >= 1) {
     try {
       const { getPublicSettings } = await import('../modules/admin/public-settings')
       const settings = await getPublicSettings()
       if (settings.featureFlags.retakeRemoval === false) {
         notes.push('Retake pass: disabled in admin settings')
       } else {
-        report(75, 'Removing retakes')
+        report(75, 'Removing mistakes / retakes')
         const retake = await removeRetakes({
           cuts: baseCuts,
           words: retakeWords,

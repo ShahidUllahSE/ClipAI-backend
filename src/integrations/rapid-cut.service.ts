@@ -717,6 +717,8 @@ export async function processRapidCut(input: {
   motion?: ClipMotion
   timelineJson?: unknown
   aspectRatio?: '9:16' | '1:1' | '16:9'
+  /** Opt-in flub / retake removal */
+  removeMistakes?: boolean
   onProgress?: (percent: number, note?: string) => void
 }): Promise<RapidCutResult> {
   const notes: string[] = [
@@ -837,14 +839,17 @@ export async function processRapidCut(input: {
               compact,
               duration,
             )
-            const retakePass = await removeRetakes({
-              cuts: spokenCuts,
-              words: stt.words.length >= 4 ? stt.words : compact,
-              durationSeconds: duration,
-              inputPath: input.inputPath,
-            })
-            spokenCuts = retakePass.cuts
-            if (spokenCuts.length < 1) spokenCuts = leftoverClean
+            if (input.removeMistakes) {
+              const retakePass = await removeRetakes({
+                cuts: spokenCuts,
+                words: stt.words.length >= 4 ? stt.words : compact,
+                durationSeconds: duration,
+                inputPath: input.inputPath,
+              })
+              spokenCuts = retakePass.cuts
+              if (spokenCuts.length < 1) spokenCuts = leftoverClean
+              if (retakePass.notes.length) notes.push(...retakePass.notes)
+            }
             spokenCuts = clampCutsToSpokenWords(
               spokenCuts,
               compact,
@@ -853,7 +858,6 @@ export async function processRapidCut(input: {
             // Do not merge across retake gaps — only true overlaps.
             spokenCuts = mergeOverlappingCuts(spokenCuts)
             if (spokenCuts.length < 1) spokenCuts = leftoverClean
-            if (retakePass.notes.length) notes.push(...retakePass.notes)
             baseCuts = spokenCuts
             keep = totalKeep(baseCuts)
             method = 'transcript-cuts'
@@ -895,7 +899,7 @@ export async function processRapidCut(input: {
         transcriptWords,
         duration,
       )
-      {
+      if (input.removeMistakes) {
         const retakePass = await removeRetakes({
           cuts: baseCuts,
           words:
@@ -963,17 +967,19 @@ export async function processRapidCut(input: {
   }
   keep = totalKeep(baseCuts)
 
-  // Always strip retakes when we have a transcript, including energy-peak path.
+  // Opt-in remove-mistakes only (same toggle as talking-head).
   const retakeWordSource =
     rawTranscriptWords.length >= 4 ? rawTranscriptWords : transcriptWords
-  if (retakeWordSource.length >= 4 && baseCuts.length >= 1) {
+  if (!input.removeMistakes) {
+    notes.push('Remove mistakes: off (skipped retake pass)')
+  } else if (retakeWordSource.length >= 4 && baseCuts.length >= 1) {
     try {
       const { getPublicSettings } = await import('../modules/admin/public-settings')
       const settings = await getPublicSettings()
       if (settings.featureFlags.retakeRemoval === false) {
         notes.push('Retake pass: disabled in admin settings')
       } else {
-        report(75, 'Removing retakes')
+        report(75, 'Removing mistakes / retakes')
         const retakePass = await removeRetakes({
           cuts: baseCuts,
           words: retakeWordSource,

@@ -26,6 +26,8 @@ export interface ProjectOptionsDto {
   zoomEffect?: 'none' | 'punch' | 'zoom-in' | 'zoom-out' | 'ken-burns' | 'random'
   keepAudio: boolean
   audioNormalize: boolean
+  /** Drop flubs / repeated takes (opt-in) */
+  removeMistakes?: boolean
   /** ClipAI local tools (no API keys) */
   cropPreset: 'none' | 'center' | 'top' | 'bottom' | 'tight'
   colorGrade: 'none' | 'clean' | 'warm' | 'cool' | 'vivid'

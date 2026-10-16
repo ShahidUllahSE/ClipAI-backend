@@ -39,6 +39,7 @@ export const projectOptionsSchema = z.object({
     .default('none'),
   keepAudio: z.boolean(),
   audioNormalize: z.boolean(),
+  removeMistakes: z.boolean().optional().default(false),
   cropPreset: z.enum(CROP_PRESETS).default('center'),
   colorGrade: z.enum(COLOR_GRADES).default('clean'),
   fadeInOut: z.boolean().default(true),

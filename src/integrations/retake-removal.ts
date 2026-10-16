@@ -85,13 +85,12 @@ export function similarTakes(a: string, b: string) {
     Math.min(ta.length, tb.length) >= 4 &&
     (na.includes(nb) || nb.includes(na))
   const seq = sequenceOverlap(ta, tb)
-  // Lower thresholds + prefix match: flubs often share the first words only.
+  // Conservative match — prefix/jaccard high enough to avoid wiping unique lines.
   return (
-    jaccard >= 0.34 ||
+    jaccard >= 0.45 ||
     contained ||
-    seq >= 0.62 ||
-    samePrefix(ta, tb, 4) ||
-    (samePrefix(ta, tb, 3) && Math.min(ta.length, tb.length) >= 5)
+    seq >= 0.72 ||
+    (samePrefix(ta, tb, 4) && Math.min(ta.length, tb.length) >= 5)
   )
 }
 
@@ -479,8 +478,8 @@ export async function removeRetakes(input: {
   )
   const beforeCount = input.cuts.length
 
-  // 1) Expand merged flub+redo into separate segments
-  let cuts = expandCutsByWordGaps(input.cuts, input.words, 0.35)
+  // 1) Expand merged flub+redo into separate segments (wider gap = fewer false splits)
+  let cuts = expandCutsByWordGaps(input.cuts, input.words, 0.48)
   cuts = await expandCutsBySilence(cuts, input.inputPath)
 
   // 2) In-cut consecutive similar parts → keep later

@@ -80,6 +80,7 @@ function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
     zoomEffect: raw.zoomEffect ?? 'none',
     keepAudio: raw.keepAudio ?? true,
     audioNormalize: raw.audioNormalize ?? true,
+    removeMistakes: raw.removeMistakes ?? false,
     cropPreset: raw.cropPreset ?? 'center',
     colorGrade: raw.colorGrade ?? 'clean',
     fadeInOut: raw.fadeInOut ?? true,
@@ -538,6 +539,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         motion: clipMotionFromTimeline(options.timelineJson, options),
         timelineJson: options.timelineJson,
         aspectRatio: options.aspectRatio,
+        removeMistakes: Boolean(options.removeMistakes),
         onProgress: writeProgress,
       })
 
@@ -975,6 +977,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         motion: clipMotionFromTimeline(options.timelineJson, options),
         timelineJson: options.timelineJson,
         aspectRatio: options.aspectRatio,
+        removeMistakes: Boolean(options.removeMistakes),
         onProgress: writeProgress,
       })
 
