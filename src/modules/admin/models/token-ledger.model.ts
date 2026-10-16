@@ -2,6 +2,7 @@ import { Schema, model, type Document, type InferSchemaType } from 'mongoose'
 
 export const TOKEN_LEDGER_REASONS = [
   'consume',
+  'refund',
   'admin_add',
   'admin_deduct',
   'admin_reset',

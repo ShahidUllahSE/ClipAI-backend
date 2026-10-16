@@ -347,6 +347,14 @@ export const userService = {
   },
 
   async useEditCredit(userId: string): Promise<{ user: PublicUser }> {
+    return this.reserveEditCredit(userId)
+  },
+
+  /**
+   * Atomically take one credit when a job is queued.
+   * Safe for batch starts that hit /process at the same time.
+   */
+  async reserveEditCredit(userId: string): Promise<{ user: PublicUser }> {
     const user = await findUserOrFail(userId)
 
     if (user.billingStatus !== 'active') {
@@ -356,33 +364,68 @@ export const userService = {
       )
     }
 
-    if (user.planId !== 'unlimited' && user.remainingEdits <= 0) {
+    if (user.planId === 'unlimited') {
+      return { user: toPublicUser(user) }
+    }
+
+    const updated = await UserModel.findOneAndUpdate(
+      {
+        _id: userId,
+        billingStatus: 'active',
+        planId: { $ne: 'unlimited' },
+        remainingEdits: { $gt: 0 },
+      },
+      { $inc: { remainingEdits: -1 } },
+      { new: true },
+    )
+
+    if (!updated) {
       throw new AppError(
         'No edit credits remaining. Upgrade your plan.',
         HTTP_STATUS.PAYMENT_REQUIRED,
       )
     }
 
-    if (user.planId !== 'unlimited') {
-      user.remainingEdits -= 1
-      await user.save()
-      try {
-        const { TokenLedgerModel } = await import(
-          '../admin/models/token-ledger.model'
-        )
-        await TokenLedgerModel.create({
-          userId: user._id,
-          actorId: null,
-          delta: -1,
-          balanceAfter: user.remainingEdits,
-          reason: 'consume',
-          note: 'AI edit credit used',
-        })
-      } catch {
-        // Ledger is best-effort; do not fail the render charge.
-      }
+    try {
+      const { TokenLedgerModel } = await import(
+        '../admin/models/token-ledger.model'
+      )
+      await TokenLedgerModel.create({
+        userId: updated._id,
+        actorId: null,
+        delta: -1,
+        balanceAfter: updated.remainingEdits,
+        reason: 'consume',
+        note: 'AI edit credit reserved',
+      })
+    } catch {
+      // Ledger is best-effort; do not fail the render charge.
     }
 
-    return { user: toPublicUser(user) }
+    return { user: toPublicUser(updated) }
+  },
+
+  /** Refund a reserved credit when a queued job fails before a successful export. */
+  async refundEditCredit(userId: string): Promise<void> {
+    const user = await UserModel.findById(userId)
+    if (!user || user.planId === 'unlimited') return
+
+    user.remainingEdits += 1
+    await user.save()
+    try {
+      const { TokenLedgerModel } = await import(
+        '../admin/models/token-ledger.model'
+      )
+      await TokenLedgerModel.create({
+        userId: user._id,
+        actorId: null,
+        delta: 1,
+        balanceAfter: user.remainingEdits,
+        reason: 'refund',
+        note: 'AI edit credit refunded after failed job',
+      })
+    } catch {
+      // best-effort
+    }
   },
 }

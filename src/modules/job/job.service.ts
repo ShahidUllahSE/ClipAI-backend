@@ -18,12 +18,6 @@ export const jobService = {
         HTTP_STATUS.PAYMENT_REQUIRED,
       )
     }
-    if (user.planId !== 'unlimited' && user.remainingEdits <= 0) {
-      throw new AppError(
-        'No edit credits remaining. Upgrade your plan.',
-        HTTP_STATUS.PAYMENT_REQUIRED,
-      )
-    }
 
     const project = await projectService.getDocument(projectId, userId)
     if (ACTIVE_PROCESS_STATUSES.includes(project.status as ProjectStatus)) {
@@ -37,6 +31,13 @@ export const jobService = {
         'Project cannot be processed from this status.',
         HTTP_STATUS.BAD_REQUEST,
       )
+    }
+
+    // Reserve credit up front so batch /process calls can't oversell the same tokens.
+    const { userService } = await import('../user/user.service')
+    if (!project.creditCharged) {
+      await userService.reserveEditCredit(userId)
+      project.creditCharged = true
     }
 
     project.status = 'Queued'

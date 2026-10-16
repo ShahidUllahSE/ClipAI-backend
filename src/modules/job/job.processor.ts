@@ -1191,10 +1191,31 @@ export async function runJobPipeline(jobId: string, projectId: string) {
     const message =
       error instanceof Error ? error.message : 'Processing failed.'
     console.error('[job]', projectId, message)
-    await ProjectModel.updateOne(
-      { _id: projectId },
-      { $set: { status: 'Failed', errorMessage: message } },
-    )
+
+    // Refund credit reserved at queue time — failed jobs never keep the token.
+    try {
+      const failed = await ProjectModel.findById(projectId)
+      if (failed?.creditCharged) {
+        const { userService } = await import('../user/user.service')
+        await userService.refundEditCredit(failed.userId.toString())
+        failed.creditCharged = false
+        failed.status = 'Failed'
+        failed.errorMessage = message
+        await failed.save()
+      } else {
+        await ProjectModel.updateOne(
+          { _id: projectId },
+          { $set: { status: 'Failed', errorMessage: message } },
+        )
+      }
+    } catch (refundError) {
+      console.error('[job] credit refund failed', projectId, refundError)
+      await ProjectModel.updateOne(
+        { _id: projectId },
+        { $set: { status: 'Failed', errorMessage: message } },
+      )
+    }
+
     await JobModel.updateOne(
       { _id: jobId },
       {
