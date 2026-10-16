@@ -8,6 +8,7 @@ import {
   errorHandler,
   notFoundHandler,
 } from './middleware/error.middleware'
+import { maintenanceGate } from './middleware/maintenance.middleware'
 import { apiRouter } from './routes'
 
 export function createApp() {
@@ -55,6 +56,7 @@ export function createApp() {
   )
   app.use(express.json({ limit: '2mb' }))
   app.use(morgan(env.isDev ? 'dev' : 'combined'))
+  app.use(maintenanceGate)
 
   app.use('/api', apiRouter)
 

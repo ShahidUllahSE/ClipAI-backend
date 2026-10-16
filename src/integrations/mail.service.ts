@@ -1,8 +1,8 @@
 import nodemailer from 'nodemailer'
 import { env } from '../config'
+import { EmailTemplateModel } from '../modules/admin/models/email-template.model'
 
 function smtpPassword() {
-  // Gmail app passwords are often pasted with spaces
   return env.DEFAULT_SMTP_PASSWORD.replace(/\s+/g, '')
 }
 
@@ -68,34 +68,78 @@ function layout(title: string, bodyHtml: string, actionUrl: string, cta: string)
 </html>`
 }
 
+function applyVars(text: string, vars: Record<string, string>) {
+  return Object.entries(vars).reduce(
+    (out, [key, value]) => out.replaceAll(`{{${key}}}`, value),
+    text,
+  )
+}
+
+async function renderTemplate(
+  slug: string,
+  vars: Record<string, string>,
+): Promise<{ subject: string; text: string } | null> {
+  try {
+    const template = await EmailTemplateModel.findOne({
+      slug,
+      isActive: true,
+    }).lean()
+    if (!template) return null
+    return {
+      subject: applyVars(template.subject, vars),
+      text: applyVars(template.body, vars),
+    }
+  } catch {
+    return null
+  }
+}
+
 export const mailService = {
   isConfigured,
 
-  async sendVerifyEmail(to: string, verifyUrl: string) {
+  async sendVerifyEmail(to: string, verifyUrl: string, name = 'there') {
+    const rendered = await renderTemplate('verify-email', {
+      name,
+      link: verifyUrl,
+      email: to,
+    })
+    const subject = rendered?.subject || 'Verify your ClipAI email'
+    const text =
+      rendered?.text ||
+      `Welcome to ClipAI.\n\nVerify your email:\n${verifyUrl}\n\nThis link expires soon.`
+    const htmlBody = text
+      .split('\n')
+      .map((line) => (line.trim() ? `<p style="margin:0 0 10px;">${line}</p>` : '<br/>'))
+      .join('')
+
     await sendMail({
       to,
-      subject: 'Verify your ClipAI email',
-      text: `Welcome to ClipAI.\n\nVerify your email:\n${verifyUrl}\n\nThis link expires soon.`,
-      html: layout(
-        'Verify your email',
-        'Thanks for joining <strong>ClipAI</strong>. Confirm your email to finish setting up your account.',
-        verifyUrl,
-        'Verify email',
-      ),
+      subject,
+      text,
+      html: layout('Verify your email', htmlBody, verifyUrl, 'Verify email'),
     })
   },
 
-  async sendPasswordReset(to: string, resetUrl: string) {
+  async sendPasswordReset(to: string, resetUrl: string, name = 'there') {
+    const rendered = await renderTemplate('password-reset', {
+      name,
+      link: resetUrl,
+      email: to,
+    })
+    const subject = rendered?.subject || 'Reset your ClipAI password'
+    const text =
+      rendered?.text ||
+      `Reset your ClipAI password:\n${resetUrl}\n\nIf you did not request this, ignore this email.`
+    const htmlBody = text
+      .split('\n')
+      .map((line) => (line.trim() ? `<p style="margin:0 0 10px;">${line}</p>` : '<br/>'))
+      .join('')
+
     await sendMail({
       to,
-      subject: 'Reset your ClipAI password',
-      text: `Reset your ClipAI password:\n${resetUrl}\n\nIf you did not request this, ignore this email.`,
-      html: layout(
-        'Reset your password',
-        'We received a request to reset your ClipAI password. Click below to choose a new one. If you did not ask for this, you can ignore this email.',
-        resetUrl,
-        'Reset password',
-      ),
+      subject,
+      text,
+      html: layout('Reset your password', htmlBody, resetUrl, 'Reset password'),
     })
   },
 }

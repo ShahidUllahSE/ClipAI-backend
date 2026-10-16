@@ -97,9 +97,9 @@ async function consumeToken(
   return user
 }
 
-async function sendVerifyOrThrow(email: string, url: string) {
+async function sendVerifyOrThrow(email: string, url: string, name?: string) {
   try {
-    await mailService.sendVerifyEmail(email, url)
+    await mailService.sendVerifyEmail(email, url, name)
   } catch (error) {
     console.error('[mail] verify failed:', error)
     throw new AppError(
@@ -109,9 +109,9 @@ async function sendVerifyOrThrow(email: string, url: string) {
   }
 }
 
-async function sendResetOrThrow(email: string, url: string) {
+async function sendResetOrThrow(email: string, url: string, name?: string) {
   try {
-    await mailService.sendPasswordReset(email, url)
+    await mailService.sendPasswordReset(email, url, name)
   } catch (error) {
     console.error('[mail] reset failed:', error)
     throw new AppError(
@@ -131,6 +131,15 @@ export const userService = {
     },
     originHeader?: string,
   ): Promise<AuthPayload> {
+    const { getPublicSettings } = await import('../admin/public-settings')
+    const settings = await getPublicSettings()
+    if (!settings.allowSignups) {
+      throw new AppError(
+        'New signups are temporarily closed.',
+        HTTP_STATUS.FORBIDDEN,
+      )
+    }
+
     const existing = await UserModel.findOne({ email: input.email }).lean()
     if (existing) {
       throw new AppError(
@@ -139,7 +148,9 @@ export const userService = {
       )
     }
 
-    const planId: PlanId = input.planId ?? 'basic'
+    const planId = (input.planId ??
+      (settings.defaultPlanSlug as PlanId) ??
+      'basic') as PlanId
     const user = await UserModel.create({
       name: input.name,
       email: input.email,
@@ -156,7 +167,7 @@ export const userService = {
     )
     const origin = clientOrigin(originHeader)
     const url = verifyLink(origin, raw)
-    await sendVerifyOrThrow(user.email, url)
+    await sendVerifyOrThrow(user.email, url, user.name)
 
     return withAuth(toPublicUser(user), {
       message: 'Account created. Check your email to verify.',
@@ -214,7 +225,7 @@ export const userService = {
         TOKEN_TTL_MS.EMAIL_VERIFY,
       )
       const url = verifyLink(clientOrigin(originHeader), raw)
-      await sendVerifyOrThrow(user.email, url)
+      await sendVerifyOrThrow(user.email, url, user.name)
       return {
         user: toPublicUser(user),
         message: 'Profile updated. Check your email to verify the new address.',
@@ -258,7 +269,7 @@ export const userService = {
       TOKEN_TTL_MS.PASSWORD_RESET,
     )
     const url = resetLink(clientOrigin(originHeader), raw)
-    await sendResetOrThrow(user.email, url)
+    await sendResetOrThrow(user.email, url, user.name)
 
     return generic
   },
@@ -310,7 +321,7 @@ export const userService = {
       TOKEN_TTL_MS.EMAIL_VERIFY,
     )
     const url = verifyLink(clientOrigin(originHeader), raw)
-    await sendVerifyOrThrow(user.email, url)
+    await sendVerifyOrThrow(user.email, url, user.name)
 
     return { message: 'Verification email sent. Check your inbox.' }
   },
@@ -320,8 +331,9 @@ export const userService = {
     planId: PlanId,
   ): Promise<{ user: PublicUser }> {
     const user = await findUserOrFail(userId)
+    const { resolvePlanQuota } = await import('../admin/admin.plans')
     user.planId = planId
-    user.remainingEdits = PLAN_EDIT_QUOTA[planId]
+    user.remainingEdits = await resolvePlanQuota(planId)
     user.billingStatus = 'active'
     await user.save()
     return { user: toPublicUser(user) }
@@ -354,6 +366,21 @@ export const userService = {
     if (user.planId !== 'unlimited') {
       user.remainingEdits -= 1
       await user.save()
+      try {
+        const { TokenLedgerModel } = await import(
+          '../admin/models/token-ledger.model'
+        )
+        await TokenLedgerModel.create({
+          userId: user._id,
+          actorId: null,
+          delta: -1,
+          balanceAfter: user.remainingEdits,
+          reason: 'consume',
+          note: 'AI edit credit used',
+        })
+      } catch {
+        // Ledger is best-effort; do not fail the render charge.
+      }
     }
 
     return { user: toPublicUser(user) }

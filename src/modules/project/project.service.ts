@@ -87,6 +87,23 @@ export const projectService = {
         )
       : []
 
+    const { getPublicSettings } = await import('../admin/public-settings')
+    const settings = await getPublicSettings()
+    if (input.mode === 'ai-combine' && !settings.featureFlags.aiCombine) {
+      throw new AppError(
+        'AI Combine is currently disabled.',
+        HTTP_STATUS.FORBIDDEN,
+      )
+    }
+
+    let options = { ...input.options }
+    if (options.captions && !settings.featureFlags.captions) {
+      options = { ...options, captions: false }
+    }
+    if (options.zoomEffect === 'random' && !settings.featureFlags.randomZoom) {
+      options = { ...options, zoomEffect: 'none' }
+    }
+
     if (input.mode === 'ai-combine' && !secondary) {
       throw new AppError(
         'AI Combine requires a second video upload.',
@@ -108,6 +125,13 @@ export const projectService = {
         : upload.durationSeconds +
           (secondary?.durationSeconds ?? 0) +
           extraDuration
+
+    if (durationSeconds > settings.maxDurationSeconds) {
+      throw new AppError(
+        `Video exceeds the max duration of ${settings.maxDurationSeconds}s.`,
+        HTTP_STATUS.BAD_REQUEST,
+      )
+    }
 
     if (input.durationSeconds && input.durationSeconds > 0) {
       upload.durationSeconds = input.durationSeconds
@@ -133,7 +157,7 @@ export const projectService = {
       durationSeconds,
       mimeType: upload.mimeType,
       mode: input.mode,
-      options: withOptionDefaults(input.options),
+      options: withOptionDefaults(options),
       status: 'Uploaded',
       generatedTitle,
       outputFilename: suggestFilename(generatedTitle),

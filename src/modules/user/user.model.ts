@@ -2,7 +2,6 @@ import { Schema, model, type Document, type InferSchemaType } from 'mongoose'
 import {
   BILLING_STATUSES,
   PLAN_EDIT_QUOTA,
-  PLAN_IDS,
   TOKEN_TYPES,
 } from '../../constants/plans'
 import { USER_ROLES } from '../../constants/roles'
@@ -56,8 +55,8 @@ const userSchema = new Schema(
     },
     planId: {
       type: String,
-      enum: PLAN_IDS,
       default: 'basic',
+      index: true,
     },
     remainingEdits: {
       type: Number,

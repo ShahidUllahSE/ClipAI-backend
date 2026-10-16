@@ -9,7 +9,6 @@ import {
   CROP_PRESETS,
   EDITING_MODES,
   KEYFRAME_PRESETS,
-  ZOOM_EFFECTS,
   PACING_LEVELS,
   SILENCE_LEVELS,
   SPEED_RAMPS,
@@ -33,7 +32,11 @@ export const projectOptionsSchema = z.object({
   speedRamp: z.enum(SPEED_RAMPS),
   keyframing: z.boolean(),
   keyframePreset: z.enum(KEYFRAME_PRESETS),
-  zoomEffect: z.enum(ZOOM_EFFECTS).optional().default('none'),
+  // Must include `random` — New Project "Randomize" sends this; export expands to punch/zoom/ken-burns per cut.
+  zoomEffect: z
+    .enum(['none', 'punch', 'zoom-in', 'zoom-out', 'ken-burns', 'random'])
+    .optional()
+    .default('none'),
   keepAudio: z.boolean(),
   audioNormalize: z.boolean(),
   cropPreset: z.enum(CROP_PRESETS).default('center'),

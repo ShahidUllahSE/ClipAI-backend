@@ -4,29 +4,25 @@ import { UserModel } from '../modules/user/user.model'
 
 export async function seedAdminUser(): Promise<void> {
   const email = env.ADMIN_EMAIL.toLowerCase()
-  const existing = await UserModel.findOne({ email }).lean()
+  const passwordHash = await hashPassword(env.ADMIN_PASSWORD)
+  const existing = await UserModel.findOne({ email }).select('+passwordHash')
 
   if (existing) {
-    if (existing.role !== 'admin') {
-      await UserModel.updateOne(
-        { email },
-        {
-          $set: {
-            role: 'admin',
-            isActive: true,
-            emailVerified: true,
-          },
-        },
-      )
-      console.log(`[ClipAI] Promoted existing user to admin: ${email}`)
-    }
+    existing.role = 'admin'
+    existing.isActive = true
+    existing.emailVerified = true
+    existing.passwordHash = passwordHash
+    if (!existing.planId) existing.planId = 'unlimited'
+    if (existing.remainingEdits == null) existing.remainingEdits = 9999
+    await existing.save()
+    console.log(`[ClipAI] Synced admin account: ${email}`)
     return
   }
 
   await UserModel.create({
     name: env.ADMIN_NAME,
     email,
-    passwordHash: await hashPassword(env.ADMIN_PASSWORD),
+    passwordHash,
     role: 'admin',
     isActive: true,
     emailVerified: true,

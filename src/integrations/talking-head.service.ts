@@ -17,8 +17,10 @@ import {
 } from './ffmpeg'
 import { removeRetakes } from './retake-removal'
 import {
+  buildRandomCutMotions,
   extraZoomByCutFromTimeline,
   perCutMotionsFromTimeline,
+  summarizeCutMotions,
 } from './timeline-fx'
 import {
   assFontSizeFromUi,
@@ -382,20 +384,28 @@ export async function processTalkingHead(input: {
     }
   }
 
-  if (speechWords.length && baseCuts.length >= 1) {
+  // Use raw STT words (not filler-stripped) so gap timing + phrase match work.
+  const retakeWords = words.length >= 4 ? words : speechWords
+  if (retakeWords.length && baseCuts.length >= 1) {
     try {
-      report(75, 'Removing retakes')
-      const retake = await removeRetakes({
-        cuts: baseCuts,
-        words: speechWords,
-        durationSeconds: duration,
-        inputPath: input.inputPath,
-      })
-      if (retake.cuts.length) {
-        baseCuts = retake.cuts
-        keepSeconds = totalKeepSeconds(baseCuts)
-        removedSeconds = Math.max(0, duration - keepSeconds)
-        notes.push(...retake.notes)
+      const { getPublicSettings } = await import('../modules/admin/public-settings')
+      const settings = await getPublicSettings()
+      if (settings.featureFlags.retakeRemoval === false) {
+        notes.push('Retake pass: disabled in admin settings')
+      } else {
+        report(75, 'Removing retakes')
+        const retake = await removeRetakes({
+          cuts: baseCuts,
+          words: retakeWords,
+          durationSeconds: duration,
+          inputPath: input.inputPath,
+        })
+        if (retake.cuts.length) {
+          baseCuts = retake.cuts
+          keepSeconds = totalKeepSeconds(baseCuts)
+          removedSeconds = Math.max(0, duration - keepSeconds)
+          notes.push(...retake.notes)
+        }
       }
     } catch (error) {
       notes.push(
@@ -424,14 +434,19 @@ export async function processTalkingHead(input: {
   }
 
   report(76, 'Cutting and exporting')
-  const perCutMotions = perCutMotionsFromTimeline(input.timelineJson, cuts.length)
+  const motion = input.motion ?? 'punch'
+  // Options "Randomize" wins over a single editor transition (often zoom-in).
+  const perCutMotions =
+    motion === 'random'
+      ? buildRandomCutMotions(cuts.length)
+      : perCutMotionsFromTimeline(input.timelineJson, cuts.length)
   const extraZoomByCut = extraZoomByCutFromTimeline(input.timelineJson, cuts)
   await renderJumpCutVideo({
     inputPath: input.inputPath,
     outputPath: input.outputPath,
     cuts,
     keepAudio: input.keepAudio,
-    motion: input.motion ?? 'punch',
+    motion,
     perCutMotions,
     extraZoomByCut,
     aspectRatio,
@@ -439,10 +454,15 @@ export async function processTalkingHead(input: {
   })
   report(94, 'Finishing export')
   if (perCutMotions?.length) {
-    notes.push(`Applied ${perCutMotions[0]} to every keep-segment`)
-  } else if ((input.motion ?? 'punch') !== 'none') {
+    const mix = summarizeCutMotions(perCutMotions)
     notes.push(
-      `Jump-cut motion: ${input.motion ?? 'punch'} (full-body overall, light punch-in)`,
+      motion === 'random' || new Set(perCutMotions).size > 1
+        ? `Randomized jump-cut motions across ${perCutMotions.length} keep-segments (${mix})`
+        : `Applied ${perCutMotions[0]} to every keep-segment`,
+    )
+  } else if (motion !== 'none') {
+    notes.push(
+      `Jump-cut motion: ${motion} (full-body overall, light punch-in)`,
     )
   }
   if (extraZoomByCut?.length) {

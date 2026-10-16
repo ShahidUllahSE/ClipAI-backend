@@ -5,6 +5,7 @@ import { promisify } from 'util'
 import ffmpegPath from 'ffmpeg-static'
 import ffprobePath from 'ffprobe-static'
 import { env } from '../config'
+import { buildRandomCutMotions } from './timeline-fx'
 
 const execFileAsync = promisify(execFile)
 
@@ -557,13 +558,6 @@ export type ClipMotion =
   | 'blur'
   | 'flash'
 
-/** Client randomize pool: Punch, Zoom in, Zoom out, Ken Burns */
-const RANDOM_ZOOM_POOL: ClipMotion[] = [
-  'punch',
-  'zoom-in',
-  'zoom-out',
-  'ken-burns',
-]
 
 export type SubjectFocus = { x: number; y: number }
 
@@ -730,10 +724,11 @@ function motionScaleCrop(
   }
 
   const applyKenBurns = (fx: number, fy: number) => {
-    const a = Math.max(1.08, 1.08 * zMul)
-    const b = Math.max(a + 0.28, 1.52 * zMul)
-    const px = (Math.min(0.82, Math.max(0.18, fx)) - 0.5).toFixed(3)
-    const py = (Math.min(0.72, Math.max(0.28, fy)) - 0.5).toFixed(3)
+    // Drift + mild zoom — reads different from a straight push-in.
+    const a = Math.max(1.05, 1.05 * zMul)
+    const b = Math.max(a + 0.18, 1.32 * zMul)
+    const px = (Math.min(0.88, Math.max(0.12, fx)) - 0.5).toFixed(3)
+    const py = (Math.min(0.78, Math.max(0.22, fy)) - 0.5).toFixed(3)
     const zExpr = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,t/${d})`
     const xExpr = `(iw-ow)/2+(iw-ow)*${px}*min(1\\,t/${d})`
     const yExpr = `(ih-oh)/2+(ih-oh)*${py}*min(1\\,t/${d})`
@@ -742,9 +737,9 @@ function motionScaleCrop(
 
   /** Snap punch-in on every cut — short and obvious, not a static crop. */
   const applyPunch = (fx: number, fy: number) => {
-    const punchDur = Math.max(0.22, Math.min(0.45, duration * 0.35)).toFixed(3)
+    const punchDur = Math.max(0.18, Math.min(0.32, duration * 0.28)).toFixed(3)
     const a = Math.max(1, 1 * zMul)
-    const b = Math.max(a + 0.22, 1.38 * zMul)
+    const b = Math.max(a + 0.28, 1.45 * zMul)
     const crop = `crop=${w}:${h}:${cropAround(fx, fy)}`
     const zExpr = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,t/${punchDur})`
     return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,${crop},setsar=1`
@@ -754,8 +749,8 @@ function motionScaleCrop(
 
   // Portrait source: overall = the original 9:16 frame. Do not pan.
   if (portrait) {
-    if (motion === 'zoom-in') return applyLive(1, 1.30, 0.5, 0.5)
-    if (motion === 'zoom-out') return applyLive(1.48, 1, 0.5, 0.5)
+    if (motion === 'zoom-in') return applyLive(1, 1.38, 0.5, 0.5)
+    if (motion === 'zoom-out') return applyLive(1.62, 1, 0.5, 0.5)
     if (motion === 'ken-burns') return applyKenBurns(0.58, 0.38)
     if (motion === 'punch') return applyPunch(0.5, 0.46)
     if (motion === 'fade') {
@@ -791,8 +786,8 @@ function motionScaleCrop(
     y: 0.5,
   }
 
-  if (motion === 'zoom-in') return applyLive(1, 1.30, speaker.x, 0.5)
-  if (motion === 'zoom-out') return applyLive(1.48, 1, scene.x, 0.5)
+  if (motion === 'zoom-in') return applyLive(1, 1.38, speaker.x, 0.5)
+  if (motion === 'zoom-out') return applyLive(1.62, 1, scene.x, 0.5)
   if (motion === 'ken-burns') return applyKenBurns(speaker.x, speaker.y)
   if (motion === 'punch') return applyPunch(speaker.x, speaker.y)
   if (motion === 'fade') {
@@ -1052,11 +1047,8 @@ export async function renderJumpCutVideo(input: {
   }
 
   if (motion === 'random' || perCutMotions?.some((item) => item === 'random')) {
-    perCutMotions = cuts.map(
-      () =>
-        RANDOM_ZOOM_POOL[Math.floor(Math.random() * RANDOM_ZOOM_POOL.length)] ??
-        'zoom-in',
-    )
+    // Shuffle round-robin: every 4 keep-cuts includes punch, zoom-in, zoom-out, Ken Burns.
+    perCutMotions = buildRandomCutMotions(cuts.length)
     motion = perCutMotions[0] ?? 'zoom-in'
   }
 

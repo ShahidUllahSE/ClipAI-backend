@@ -1,8 +1,8 @@
+import { detectSilenceInRange } from './ffmpeg'
 import {
-  detectSilenceInRange,
-} from './ffmpeg'
-import {
+  mergeSpokenPhrases,
   splitCutsBySilence,
+  wordsToSentenceCues,
   type TimedWord,
 } from './timed-edit'
 
@@ -50,13 +50,21 @@ function sequenceOverlap(a: string[], b: string[]) {
     }
     best = Math.max(best, hit / short.length)
   }
-  // Also compare heads (common for restarting the same CTA)
   const head = Math.min(6, short.length, long.length)
   let headHit = 0
   for (let i = 0; i < head; i++) {
     if (short[i] === long[i]) headHit += 1
   }
   return Math.max(best, headHit / Math.max(1, head))
+}
+
+/** Same opener (creators restart from the first few words). */
+function samePrefix(a: string[], b: string[], n = 4) {
+  if (a.length < n || b.length < n) return false
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
 }
 
 export function similarTakes(a: string, b: string) {
@@ -77,13 +85,73 @@ export function similarTakes(a: string, b: string) {
     Math.min(ta.length, tb.length) >= 4 &&
     (na.includes(nb) || nb.includes(na))
   const seq = sequenceOverlap(ta, tb)
-  return jaccard >= 0.42 || contained || seq >= 0.72
+  // Lower thresholds + prefix match: flubs often share the first words only.
+  return (
+    jaccard >= 0.34 ||
+    contained ||
+    seq >= 0.62 ||
+    samePrefix(ta, tb, 4) ||
+    (samePrefix(ta, tb, 3) && Math.min(ta.length, tb.length) >= 5)
+  )
 }
 
 function thoughtLooksComplete(text: string) {
   const tokens = takeTokens(text)
   if (tokens.length >= 8) return true
   return /[.!?]$/.test(text.trim()) || tokens.length >= 5
+}
+
+/**
+ * Split keep-cuts on real word gaps so flub + redo become separate segments.
+ * Uses raw STT timings (not compacted) — gaps must survive.
+ */
+export function expandCutsByWordGaps(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+  minGap = 0.35,
+) {
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
+    const inside = [...wordsInCut(cut, words)].sort((a, b) => a.start - b.start)
+    if (inside.length < 2) {
+      out.push({ ...cut })
+      continue
+    }
+    let start = Math.max(cut.start, inside[0].start - 0.04)
+    for (let i = 1; i < inside.length; i++) {
+      const gap = inside[i].start - inside[i - 1].end
+      if (gap >= minGap) {
+        const end = Math.min(cut.end, inside[i - 1].end + 0.06)
+        if (end - start >= 0.22) out.push({ start, end })
+        start = Math.max(cut.start, inside[i].start - 0.04)
+      }
+    }
+    const end = Math.min(cut.end, inside[inside.length - 1].end + 0.06)
+    if (end - start >= 0.22) out.push({ start, end })
+  }
+  return out.length ? out : cuts
+}
+
+async function expandCutsBySilence(
+  cuts: Array<{ start: number; end: number }>,
+  inputPath: string,
+) {
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
+    if (cut.end - cut.start < 2.2) {
+      out.push({ ...cut })
+      continue
+    }
+    try {
+      const holes = await detectSilenceInRange(inputPath, cut.start, cut.end)
+      const parts = splitCutsBySilence([cut], holes, 0.26)
+      if (parts.length > 1) out.push(...parts)
+      else out.push({ ...cut })
+    } catch {
+      out.push({ ...cut })
+    }
+  }
+  return out.length ? out : cuts
 }
 
 /**
@@ -112,34 +180,87 @@ export function dropRepeatedTakes(
 }
 
 /**
- * One keep-clip sometimes contains a flub + the redo. Keep the later half.
+ * One keep-clip sometimes contains a flub + the redo.
+ * Split into consecutive word-gap parts; keep later of each similar pair.
  */
 export function trimDoubledTakeCuts(
   cuts: Array<{ start: number; end: number }>,
   words: TimedWord[],
   durationSeconds: number,
 ) {
-  return cuts.map((cut) => {
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
     const inside = [...wordsInCut(cut, words)].sort((a, b) => a.start - b.start)
-    if (inside.length < 10 || cut.end - cut.start < 5) return cut
-    const midCount = Math.floor(inside.length / 2)
-    const first = inside
-      .slice(0, midCount)
-      .map((word) => word.word)
-      .join(' ')
-    const second = inside
-      .slice(midCount)
-      .map((word) => word.word)
-      .join(' ')
-    if (!similarTakes(first, second)) return cut
-    const later = inside.slice(midCount)
-    const start = Math.max(0, later[0].start - 0.04)
-    const end = Math.min(
+    if (inside.length < 6 || cut.end - cut.start < 2.5) {
+      out.push(cut)
+      continue
+    }
+
+    // Build sub-segments on gaps ≥0.32s inside this cut
+    const parts: Array<{ start: number; end: number }> = []
+    let start = Math.max(0, inside[0].start - 0.04)
+    for (let i = 1; i < inside.length; i++) {
+      const gap = inside[i].start - inside[i - 1].end
+      if (gap >= 0.32) {
+        const end = Math.min(durationSeconds, inside[i - 1].end + 0.06)
+        if (end - start >= 0.35) parts.push({ start, end })
+        start = Math.max(0, inside[i].start - 0.04)
+      }
+    }
+    const lastEnd = Math.min(
       durationSeconds,
-      later[later.length - 1].end + 0.06,
+      inside[inside.length - 1].end + 0.06,
     )
-    return end - start >= 0.8 ? { start, end } : cut
-  })
+    if (lastEnd - start >= 0.35) parts.push({ start, end: lastEnd })
+
+    if (parts.length < 2) {
+      // Fallback: midpoint compare (old heuristic, looser gates)
+      const midCount = Math.floor(inside.length / 2)
+      const first = inside
+        .slice(0, midCount)
+        .map((word) => word.word)
+        .join(' ')
+      const second = inside
+        .slice(midCount)
+        .map((word) => word.word)
+        .join(' ')
+      if (similarTakes(first, second)) {
+        const later = inside.slice(midCount)
+        const s = Math.max(0, later[0].start - 0.04)
+        const e = Math.min(
+          durationSeconds,
+          later[later.length - 1].end + 0.06,
+        )
+        out.push(e - s >= 0.8 ? { start: s, end: e } : cut)
+      } else {
+        out.push(cut)
+      }
+      continue
+    }
+
+    const keep = parts.map(() => true)
+    for (let later = parts.length - 1; later >= 1; later -= 1) {
+      if (!keep[later]) continue
+      const laterText = cutText(parts[later], words)
+      if (takeTokens(laterText).length < 3) continue
+      for (let earlier = 0; earlier < later; earlier += 1) {
+        if (!keep[earlier]) continue
+        // Prefer adjacent / nearby pairs (same retake burst)
+        const gap = parts[later].start - parts[earlier].end
+        if (gap > 8) continue
+        if (similarTakes(cutText(parts[earlier], words), laterText)) {
+          keep[earlier] = false
+        }
+      }
+    }
+    const kept = parts.filter((_, index) => keep[index])
+    if (kept.length && kept.length < parts.length) {
+      out.push(...kept)
+    } else {
+      out.push(cut)
+    }
+  }
+  return out.length ? out : cuts
 }
 
 function pickFirstCompleteTake(
@@ -169,6 +290,66 @@ function clipCutsToHardEnd(
 }
 
 /**
+ * Drop earlier duplicate spoken phrases (sentence-level), keep later.
+ * Rebuilds time ranges from kept phrase spans.
+ */
+function dropRepeatedPhrases(
+  cuts: Array<{ start: number; end: number }>,
+  words: TimedWord[],
+) {
+  if (words.length < 6 || cuts.length < 1) return cuts
+  // Use uncompacted gaps so flub/redo pauses still split.
+  const sentences = mergeSpokenPhrases(
+    wordsToSentenceCues(words, { minPause: 0.32 }),
+  ).filter((s) => takeTokens(s.text).length >= 3)
+  if (sentences.length < 2) return cuts
+
+  const keep = sentences.map(() => true)
+  for (let later = sentences.length - 1; later >= 1; later -= 1) {
+    if (!keep[later]) continue
+    for (let earlier = 0; earlier < later; earlier += 1) {
+      if (!keep[earlier]) continue
+      if (similarTakes(sentences[earlier].text, sentences[later].text)) {
+        keep[earlier] = false
+      }
+    }
+  }
+
+  const dropped = keep.filter((ok) => !ok).length
+  if (!dropped) return cuts
+
+  // Remove cut time that overlaps dropped phrase spans
+  const dropRanges = sentences
+    .filter((_, index) => !keep[index])
+    .map((s) => ({ start: s.start, end: s.end }))
+
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
+    let pieces = [{ ...cut }]
+    for (const drop of dropRanges) {
+      const next: Array<{ start: number; end: number }> = []
+      for (const piece of pieces) {
+        if (drop.end <= piece.start + 0.05 || drop.start >= piece.end - 0.05) {
+          next.push(piece)
+          continue
+        }
+        if (drop.start > piece.start + 0.2) {
+          next.push({ start: piece.start, end: Math.min(piece.end, drop.start) })
+        }
+        if (drop.end < piece.end - 0.2) {
+          next.push({ start: Math.max(piece.start, drop.end), end: piece.end })
+        }
+      }
+      pieces = next
+    }
+    for (const piece of pieces) {
+      if (piece.end - piece.start >= 0.22) out.push(piece)
+    }
+  }
+  return out.length ? out : cuts
+}
+
+/**
  * Closing CTA filmed twice. Keep the first complete closing line; drop the redo.
  */
 export async function dropClosingRetake(
@@ -179,65 +360,98 @@ export async function dropClosingRetake(
 ) {
   if (!cuts.length || words.length < 6) return cuts
   const closeStart = Math.max(0, durationSeconds - 30)
+
+  const sentences = mergeSpokenPhrases(
+    wordsToSentenceCues(words, { minPause: 0.32 }),
+  ).filter(
+    (sentence) =>
+      sentence.start >= closeStart - 0.4 &&
+      takeTokens(sentence.text).length >= 4,
+  )
+
+  if (sentences.length >= 2) {
+    const keep = sentences.map(() => true)
+    for (let later = 1; later < sentences.length; later += 1) {
+      if (!keep[later]) continue
+      for (let earlier = 0; earlier < later; earlier += 1) {
+        if (!keep[earlier]) continue
+        if (similarTakes(sentences[earlier].text, sentences[later].text)) {
+          // Closing CTA: keep the first complete take, drop the later redo.
+          if (thoughtLooksComplete(sentences[earlier].text)) {
+            keep[later] = false
+          } else {
+            keep[earlier] = false
+          }
+          break
+        }
+      }
+    }
+    const droppedLater = keep.some((ok, index) => index > 0 && !ok)
+    if (droppedLater) {
+      const firstKept = sentences.find((_, index) => keep[index])
+      const keptEnds = sentences
+        .filter((_, index) => keep[index])
+        .map((s) => s.end)
+      if (firstKept && keptEnds.length) {
+        let hardEnd = Math.max(...keptEnds) + 0.1
+        if (!keep[keep.length - 1]) {
+          hardEnd = Math.min(hardEnd, firstKept.end + 0.12)
+        }
+        return clipCutsToHardEnd(cuts, hardEnd)
+      }
+    }
+  }
+
+  // Fallback: cut-level + silence split on last long cut
   const closeCuts = cuts.filter((cut) => cut.end >= closeStart)
-  const sentences = closeCuts.length
+  const group = closeCuts.length
     ? closeCuts
     : cuts.slice(-Math.min(4, cuts.length))
-
-  const texts = sentences.map((cut) => cutText(cut, words))
+  const texts = group.map((cut) => cutText(cut, words))
   const keep = texts.map((text) => takeTokens(text).length >= 3)
-  for (let later = 1; later < sentences.length; later += 1) {
+  for (let later = 1; later < group.length; later += 1) {
     if (!keep[later]) continue
     for (let earlier = 0; earlier < later; earlier += 1) {
       if (!keep[earlier]) continue
       if (similarTakes(texts[earlier], texts[later])) {
-        keep[later] = false
+        if (thoughtLooksComplete(texts[earlier])) keep[later] = false
+        else keep[earlier] = false
         break
       }
     }
   }
-
-  const droppedLater = keep.some((ok, index) => index > 0 && !ok)
-  if (!droppedLater) {
-    // Also handle flub+redo inside the last long cut via silence holes.
-    const last = cuts[cuts.length - 1]
-    if (!last || last.end - last.start < 5.5) return cuts
-    try {
-      const holes = await detectSilenceInRange(
-        inputPath,
-        last.start,
-        last.end,
-      )
-      const parts = splitCutsBySilence(
-        [{ start: last.start, end: last.end }],
-        holes,
-        0.28,
-      )
-      if (parts.length < 2) return cuts
-      const first = pickFirstCompleteTake(last, parts, words)
-      const second = parts[parts.length - 1]
-      if (
-        first.end < last.end - 0.35 &&
-        similarTakes(cutText(first, words), cutText(second, words))
-      ) {
-        return clipCutsToHardEnd(cuts, first.end + 0.08)
-      }
-    } catch {
-      /* keep as-is */
+  if (keep.some((ok, index) => index > 0 && !ok)) {
+    const keptEnds = group.filter((_, i) => keep[i]).map((c) => c.end)
+    const firstKept = group.find((_, i) => keep[i])
+    if (firstKept && keptEnds.length) {
+      let hardEnd = Math.max(...keptEnds) + 0.1
+      if (!keep[keep.length - 1]) hardEnd = Math.min(hardEnd, firstKept.end + 0.12)
+      return clipCutsToHardEnd(cuts, hardEnd)
     }
-    return cuts
   }
 
-  const keptEnds = sentences
-    .filter((_, index) => keep[index])
-    .map((cut) => cut.end)
-  if (!keptEnds.length) return cuts
-  let hardEnd = Math.max(...keptEnds) + 0.1
-  const firstKept = sentences.find((_, index) => keep[index])
-  if (firstKept && !keep[keep.length - 1]) {
-    hardEnd = Math.min(hardEnd, firstKept.end + 0.12)
+  const last = cuts[cuts.length - 1]
+  if (!last || last.end - last.start < 4.5) return cuts
+  try {
+    const holes = await detectSilenceInRange(inputPath, last.start, last.end)
+    const parts = splitCutsBySilence(
+      [{ start: last.start, end: last.end }],
+      holes,
+      0.26,
+    )
+    if (parts.length < 2) return cuts
+    const first = pickFirstCompleteTake(last, parts, words)
+    const second = parts[parts.length - 1]
+    if (
+      first.end < last.end - 0.35 &&
+      similarTakes(cutText(first, words), cutText(second, words))
+    ) {
+      return clipCutsToHardEnd(cuts, first.end + 0.08)
+    }
+  } catch {
+    /* keep as-is */
   }
-  return clipCutsToHardEnd(cuts, hardEnd)
+  return cuts
 }
 
 /**
@@ -255,6 +469,7 @@ export async function removeRetakes(input: {
 }> {
   const notes: string[] = []
   if (!input.cuts.length || input.words.length < 4) {
+    notes.push('Retake pass: skipped (need transcript words)')
     return { cuts: input.cuts, dropped: 0, notes }
   }
 
@@ -264,12 +479,20 @@ export async function removeRetakes(input: {
   )
   const beforeCount = input.cuts.length
 
-  let cuts = trimDoubledTakeCuts(
-    input.cuts,
-    input.words,
-    input.durationSeconds,
-  )
+  // 1) Expand merged flub+redo into separate segments
+  let cuts = expandCutsByWordGaps(input.cuts, input.words, 0.35)
+  cuts = await expandCutsBySilence(cuts, input.inputPath)
+
+  // 2) In-cut consecutive similar parts → keep later
+  cuts = trimDoubledTakeCuts(cuts, input.words, input.durationSeconds)
+
+  // 3) Sentence-level duplicate phrases (across the whole timeline)
+  cuts = dropRepeatedPhrases(cuts, input.words)
+
+  // 4) Whole-cut duplicate takes → keep later
   cuts = dropRepeatedTakes(cuts, input.words)
+
+  // 5) Closing CTA filmed twice → keep first complete
   cuts = await dropClosingRetake(
     cuts,
     input.words,
@@ -278,21 +501,30 @@ export async function removeRetakes(input: {
   )
 
   if (!cuts.length) {
+    notes.push('Retake pass: no change (guard kept original cuts)')
     return { cuts: input.cuts, dropped: 0, notes }
   }
+
+  // Merge tiny adjacent leftovers that aren't retakes
+  cuts = [...cuts].sort((a, b) => a.start - b.start)
 
   const afterSeconds = cuts.reduce(
     (sum, cut) => sum + Math.max(0, cut.end - cut.start),
     0,
   )
   const dropped = Math.max(0, beforeCount - cuts.length)
+  // Also count expansions that then dropped (beforeCount may grow then shrink)
   const removedSeconds = Math.max(0, beforeSeconds - afterSeconds)
-  if (dropped > 0 || removedSeconds > 0.4) {
+
+  if (dropped > 0 || removedSeconds > 0.25) {
     notes.push(
-      `Removed retakes: kept later take${dropped ? ` (−${dropped} repeat segment${dropped === 1 ? '' : 's'})` : ''}${
-        removedSeconds > 0.4 ? `, −${removedSeconds.toFixed(1)}s` : ''
-      }`,
+      `Removed retakes: kept later take${
+        dropped ? ` (−${dropped} repeat segment${dropped === 1 ? '' : 's'})` : ''
+      }${removedSeconds > 0.25 ? `, −${removedSeconds.toFixed(1)}s` : ''}`,
     )
+  } else {
+    notes.push('Retake pass: no duplicate takes detected')
   }
+
   return { cuts, dropped, notes }
 }

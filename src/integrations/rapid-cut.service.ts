@@ -21,8 +21,10 @@ import {
 } from './speech-activity'
 import { removeRetakes } from './retake-removal'
 import {
+  buildRandomCutMotions,
   extraZoomByCutFromTimeline,
   perCutMotionsFromTimeline,
+  summarizeCutMotions,
 } from './timeline-fx'
 import {
   assignSegmentSpeeds,
@@ -837,7 +839,7 @@ export async function processRapidCut(input: {
             )
             const retakePass = await removeRetakes({
               cuts: spokenCuts,
-              words: compact,
+              words: stt.words.length >= 4 ? stt.words : compact,
               durationSeconds: duration,
               inputPath: input.inputPath,
             })
@@ -848,6 +850,7 @@ export async function processRapidCut(input: {
               compact,
               duration,
             )
+            // Do not merge across retake gaps — only true overlaps.
             spokenCuts = mergeOverlappingCuts(spokenCuts)
             if (spokenCuts.length < 1) spokenCuts = leftoverClean
             if (retakePass.notes.length) notes.push(...retakePass.notes)
@@ -895,7 +898,10 @@ export async function processRapidCut(input: {
       {
         const retakePass = await removeRetakes({
           cuts: baseCuts,
-          words: transcriptWords,
+          words:
+            rawTranscriptWords.length >= 4
+              ? rawTranscriptWords
+              : transcriptWords,
           durationSeconds: duration,
           inputPath: input.inputPath,
         })
@@ -958,19 +964,27 @@ export async function processRapidCut(input: {
   keep = totalKeep(baseCuts)
 
   // Always strip retakes when we have a transcript, including energy-peak path.
-  if (transcriptWords.length >= 4 && baseCuts.length >= 1) {
+  const retakeWordSource =
+    rawTranscriptWords.length >= 4 ? rawTranscriptWords : transcriptWords
+  if (retakeWordSource.length >= 4 && baseCuts.length >= 1) {
     try {
-      report(75, 'Removing retakes')
-      const retakePass = await removeRetakes({
-        cuts: baseCuts,
-        words: transcriptWords,
-        durationSeconds: duration,
-        inputPath: input.inputPath,
-      })
-      if (retakePass.cuts.length) {
-        baseCuts = retakePass.cuts
-        keep = totalKeep(baseCuts)
-        if (retakePass.notes.length) notes.push(...retakePass.notes)
+      const { getPublicSettings } = await import('../modules/admin/public-settings')
+      const settings = await getPublicSettings()
+      if (settings.featureFlags.retakeRemoval === false) {
+        notes.push('Retake pass: disabled in admin settings')
+      } else {
+        report(75, 'Removing retakes')
+        const retakePass = await removeRetakes({
+          cuts: baseCuts,
+          words: retakeWordSource,
+          durationSeconds: duration,
+          inputPath: input.inputPath,
+        })
+        if (retakePass.cuts.length) {
+          baseCuts = retakePass.cuts
+          keep = totalKeep(baseCuts)
+          if (retakePass.notes.length) notes.push(...retakePass.notes)
+        }
       }
     } catch (error) {
       notes.push(
@@ -1027,14 +1041,18 @@ export async function processRapidCut(input: {
   }
 
   report(76, 'Cutting and exporting')
-  const perCutMotions = perCutMotionsFromTimeline(input.timelineJson, cuts.length)
+  const motion = input.motion ?? 'punch'
+  const perCutMotions =
+    motion === 'random'
+      ? buildRandomCutMotions(cuts.length)
+      : perCutMotionsFromTimeline(input.timelineJson, cuts.length)
   const extraZoomByCut = extraZoomByCutFromTimeline(input.timelineJson, cuts)
   await renderJumpCutVideo({
     inputPath: input.inputPath,
     outputPath: input.outputPath,
     cuts,
     keepAudio: input.keepAudio,
-    motion: input.motion ?? 'punch',
+    motion,
     perCutMotions,
     extraZoomByCut,
     aspectRatio: input.aspectRatio,
@@ -1042,9 +1060,14 @@ export async function processRapidCut(input: {
   })
   report(94, 'Finishing export')
   if (perCutMotions?.length) {
-    notes.push(`Applied ${perCutMotions[0]} to every keep-segment`)
-  } else if ((input.motion ?? 'punch') !== 'none') {
-    notes.push(`Jump-cut motion: ${input.motion ?? 'punch'}`)
+    const mix = summarizeCutMotions(perCutMotions)
+    notes.push(
+      motion === 'random' || new Set(perCutMotions).size > 1
+        ? `Randomized jump-cut motions across ${perCutMotions.length} keep-segments (${mix})`
+        : `Applied ${perCutMotions[0]} to every keep-segment`,
+    )
+  } else if (motion !== 'none') {
+    notes.push(`Jump-cut motion: ${motion}`)
   }
   if (extraZoomByCut?.length) {
     notes.push('Manual zoom keyframes baked into keep-segments')

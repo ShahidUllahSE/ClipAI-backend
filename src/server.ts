@@ -37,11 +37,13 @@ dns.setServers(["8.8.8.8", "1.1.1.1"]);
 import { createApp } from "./app";
 import { env } from "./config";
 import { connectDatabase, disconnectDatabase } from "./database/connection";
+import { seedAdminDefaults } from "./modules/admin/admin.seed";
 import { seedAdminUser } from "./database/seed";
 
 async function bootstrap() {
   await connectDatabase();
   await seedAdminUser();
+  await seedAdminDefaults();
 
   const app = createApp();
   const server = app.listen(env.PORT, () => {
