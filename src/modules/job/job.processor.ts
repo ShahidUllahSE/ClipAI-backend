@@ -16,7 +16,10 @@ import {
   probeDuration,
   type ClipMotion,
 } from '../../integrations/ffmpeg'
-import { hasZoomKeyframes } from '../../integrations/timeline-fx'
+import {
+  hasZoomKeyframes,
+  wantsRandomClipEffects,
+} from '../../integrations/timeline-fx'
 import {
   planBeautifulCombine,
   renderHighlightCombine,
@@ -226,14 +229,17 @@ function clipMotionFromTimeline(
     zoomEffect?: string
   },
 ): ClipMotion {
-  // Options "Zoom effects" chips win over the editor default (which was punch).
+  // Randomize must win before keyframing — keyframing defaults to zoom-in and
+  // was making batch exports look like "zoom in only" when random was intended.
   const zoom = options?.zoomEffect
+  if (zoom === 'random' || wantsRandomClipEffects(timelineJson)) {
+    return 'random'
+  }
   if (
     zoom === 'zoom-in' ||
     zoom === 'zoom-out' ||
     zoom === 'ken-burns' ||
-    zoom === 'punch' ||
-    zoom === 'random'
+    zoom === 'punch'
   ) {
     return zoom
   }
@@ -244,6 +250,7 @@ function clipMotionFromTimeline(
   } | null
   const fromTimeline =
     json?.timeline?.transition?.type ?? json?.output?.transition?.type
+  if (fromTimeline === 'random') return 'random'
   if (
     fromTimeline === 'zoom-in' ||
     fromTimeline === 'zoom-out' ||
@@ -257,7 +264,8 @@ function clipMotionFromTimeline(
   ) {
     return fromTimeline
   }
-  if (options?.keyframing) {
+  // Only use keyframing when no explicit zoom chip was chosen.
+  if (options?.keyframing && (zoom === 'none' || zoom == null || zoom === '')) {
     if (options.keyframePreset === 'slow-zoom-out') return 'zoom-out'
     return 'zoom-in'
   }
