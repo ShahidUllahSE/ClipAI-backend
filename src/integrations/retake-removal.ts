@@ -67,7 +67,11 @@ function samePrefix(a: string[], b: string[], n = 4) {
   return true
 }
 
-export function similarTakes(a: string, b: string) {
+export function similarTakes(
+  a: string,
+  b: string,
+  opts?: { nearby?: boolean },
+) {
   const ta = takeTokens(a)
   const tb = takeTokens(b)
   if (ta.length < 3 || tb.length < 3) return false
@@ -85,13 +89,33 @@ export function similarTakes(a: string, b: string) {
     Math.min(ta.length, tb.length) >= 4 &&
     (na.includes(nb) || nb.includes(na))
   const seq = sequenceOverlap(ta, tb)
-  // Conservative match — prefix/jaccard high enough to avoid wiping unique lines.
+  // Nearby retakes (same burst, e.g. 20–25s redo) need looser gates —
+  // creators often restart after 3–4 words with a short pause.
+  if (opts?.nearby) {
+    return (
+      jaccard >= 0.32 ||
+      contained ||
+      seq >= 0.55 ||
+      samePrefix(ta, tb, 4) ||
+      (samePrefix(ta, tb, 3) && Math.min(ta.length, tb.length) >= 4)
+    )
+  }
+  // Distant pairs stay stricter so unique lines across the video aren't wiped.
   return (
-    jaccard >= 0.45 ||
+    jaccard >= 0.42 ||
     contained ||
-    seq >= 0.72 ||
+    seq >= 0.68 ||
     (samePrefix(ta, tb, 4) && Math.min(ta.length, tb.length) >= 5)
   )
+}
+
+function isNearbyPair(
+  earlierEnd: number,
+  laterStart: number,
+  maxGap = 12,
+) {
+  const gap = laterStart - earlierEnd
+  return gap >= -0.15 && gap <= maxGap
 }
 
 function thoughtLooksComplete(text: string) {
@@ -169,7 +193,10 @@ export function dropRepeatedTakes(
     if (takeTokens(laterText).length < 3) continue
     for (let earlier = 0; earlier < later; earlier += 1) {
       if (!keep[earlier]) continue
-      if (similarTakes(cutText(sorted[earlier], words), laterText)) {
+      const nearby = isNearbyPair(sorted[earlier].end, sorted[later].start)
+      if (
+        similarTakes(cutText(sorted[earlier], words), laterText, { nearby })
+      ) {
         keep[earlier] = false
       }
     }
@@ -195,12 +222,12 @@ export function trimDoubledTakeCuts(
       continue
     }
 
-    // Build sub-segments on gaps ≥0.32s inside this cut
+    // Build sub-segments on short pauses inside this cut (flub → redo)
     const parts: Array<{ start: number; end: number }> = []
     let start = Math.max(0, inside[0].start - 0.04)
     for (let i = 1; i < inside.length; i++) {
       const gap = inside[i].start - inside[i - 1].end
-      if (gap >= 0.32) {
+      if (gap >= 0.28) {
         const end = Math.min(durationSeconds, inside[i - 1].end + 0.06)
         if (end - start >= 0.35) parts.push({ start, end })
         start = Math.max(0, inside[i].start - 0.04)
@@ -223,7 +250,7 @@ export function trimDoubledTakeCuts(
         .slice(midCount)
         .map((word) => word.word)
         .join(' ')
-      if (similarTakes(first, second)) {
+      if (similarTakes(first, second, { nearby: true })) {
         const later = inside.slice(midCount)
         const s = Math.max(0, later[0].start - 0.04)
         const e = Math.min(
@@ -245,9 +272,12 @@ export function trimDoubledTakeCuts(
       for (let earlier = 0; earlier < later; earlier += 1) {
         if (!keep[earlier]) continue
         // Prefer adjacent / nearby pairs (same retake burst)
-        const gap = parts[later].start - parts[earlier].end
-        if (gap > 8) continue
-        if (similarTakes(cutText(parts[earlier], words), laterText)) {
+        if (!isNearbyPair(parts[earlier].end, parts[later].start, 14)) continue
+        if (
+          similarTakes(cutText(parts[earlier], words), laterText, {
+            nearby: true,
+          })
+        ) {
           keep[earlier] = false
         }
       }
@@ -308,7 +338,15 @@ function dropRepeatedPhrases(
     if (!keep[later]) continue
     for (let earlier = 0; earlier < later; earlier += 1) {
       if (!keep[earlier]) continue
-      if (similarTakes(sentences[earlier].text, sentences[later].text)) {
+      const nearby = isNearbyPair(
+        sentences[earlier].end,
+        sentences[later].start,
+      )
+      if (
+        similarTakes(sentences[earlier].text, sentences[later].text, {
+          nearby,
+        })
+      ) {
         keep[earlier] = false
       }
     }
@@ -374,7 +412,11 @@ export async function dropClosingRetake(
       if (!keep[later]) continue
       for (let earlier = 0; earlier < later; earlier += 1) {
         if (!keep[earlier]) continue
-        if (similarTakes(sentences[earlier].text, sentences[later].text)) {
+        if (
+          similarTakes(sentences[earlier].text, sentences[later].text, {
+            nearby: true,
+          })
+        ) {
           // Closing CTA: keep the first complete take, drop the later redo.
           if (thoughtLooksComplete(sentences[earlier].text)) {
             keep[later] = false
@@ -412,7 +454,7 @@ export async function dropClosingRetake(
     if (!keep[later]) continue
     for (let earlier = 0; earlier < later; earlier += 1) {
       if (!keep[earlier]) continue
-      if (similarTakes(texts[earlier], texts[later])) {
+      if (similarTakes(texts[earlier], texts[later], { nearby: true })) {
         if (thoughtLooksComplete(texts[earlier])) keep[later] = false
         else keep[earlier] = false
         break
@@ -443,7 +485,9 @@ export async function dropClosingRetake(
     const second = parts[parts.length - 1]
     if (
       first.end < last.end - 0.35 &&
-      similarTakes(cutText(first, words), cutText(second, words))
+      similarTakes(cutText(first, words), cutText(second, words), {
+        nearby: true,
+      })
     ) {
       return clipCutsToHardEnd(cuts, first.end + 0.08)
     }
@@ -478,8 +522,8 @@ export async function removeRetakes(input: {
   )
   const beforeCount = input.cuts.length
 
-  // 1) Expand merged flub+redo into separate segments (wider gap = fewer false splits)
-  let cuts = expandCutsByWordGaps(input.cuts, input.words, 0.48)
+  // 1) Expand merged flub+redo into separate segments
+  let cuts = expandCutsByWordGaps(input.cuts, input.words, 0.35)
   cuts = await expandCutsBySilence(cuts, input.inputPath)
 
   // 2) In-cut consecutive similar parts → keep later
