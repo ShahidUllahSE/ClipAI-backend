@@ -69,7 +69,7 @@ export const createProjectSchema = z
   })
 
 export const bulkDownloadSchema = z.object({
-  ids: z.array(z.string().min(1)).min(1).max(20).optional(),
+  ids: z.array(z.string().min(1)).min(1).max(100),
 })
 
 export const updateProjectSchema = z

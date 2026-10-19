@@ -19,7 +19,8 @@ import {
 import { ProjectModel } from './project.model'
 import type { ProjectOptionsDto, PublicProject } from './project.types'
 
-const BULK_DOWNLOAD_MAX = 20
+/** Cap zip size / request time — UI select-all uses the same limit. */
+export const BULK_DOWNLOAD_MAX = 100
 
 function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
   return {
@@ -252,24 +253,26 @@ export const projectService = {
       .filter((id) => Types.ObjectId.isValid(id))
       .slice(0, BULK_DOWNLOAD_MAX)
 
-    const query: Record<string, unknown> = {
+    // Never fall back to "all recent" — that exported more than the user selected.
+    if (!requested.length) {
+      throw new AppError(
+        'Select at least one finished video to download.',
+        HTTP_STATUS.BAD_REQUEST,
+      )
+    }
+
+    const found = await ProjectModel.find({
       userId,
       status: 'Completed',
-    }
-    if (requested.length) query._id = { $in: requested }
-
-    const found = await ProjectModel.find(query)
-      .sort({ createdAt: -1 })
-      .limit(BULK_DOWNLOAD_MAX)
+      _id: { $in: requested },
+    })
       .lean()
 
     const byId = new Map(found.map((project) => [project._id.toString(), project]))
-    const projects = requested.length
-      ? requested.flatMap((id) => {
-          const item = byId.get(id)
-          return item ? [item] : []
-        })
-      : found
+    const projects = requested.flatMap((id) => {
+      const item = byId.get(id)
+      return item ? [item] : []
+    })
 
     if (!projects.length) {
       throw new AppError(
