@@ -1,7 +1,7 @@
 import path from 'path'
 import fs from 'fs'
 import { env } from '../../config'
-import type { ProjectStatus } from '../../constants/projects'
+import { normalizeRandomPool, type ProjectStatus } from '../../constants/projects'
 import { processTalkingHead } from '../../integrations/talking-head.service'
 import { processAsmrUnboxing } from '../../integrations/asmr.service'
 import { processRapidCut } from '../../integrations/rapid-cut.service'
@@ -18,6 +18,7 @@ import {
 } from '../../integrations/ffmpeg'
 import {
   hasZoomKeyframes,
+  stripClipEffects,
   wantsRandomClipEffects,
 } from '../../integrations/timeline-fx'
 import {
@@ -68,6 +69,13 @@ async function publishOutputUrl(
 }
 
 function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
+  const zoomEffect = raw.zoomEffect ?? 'none'
+  // An explicit zoom choice is the user's latest pick — stale editor
+  // clip effects (e.g. an old Randomize) must not override it.
+  const timelineJson =
+    zoomEffect !== 'none'
+      ? stripClipEffects(raw.timelineJson ?? null)
+      : raw.timelineJson ?? null
   return {
     captions: raw.captions ?? true,
     captionPosition: raw.captionPosition ?? 'bottom',
@@ -80,7 +88,8 @@ function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
     speedRamp: raw.speedRamp ?? 'light',
     keyframing: raw.keyframing ?? true,
     keyframePreset: raw.keyframePreset ?? 'speaker-punch-in',
-    zoomEffect: raw.zoomEffect ?? 'none',
+    zoomEffect,
+    randomPool: normalizeRandomPool(raw.randomPool),
     keepAudio: raw.keepAudio ?? true,
     audioNormalize: raw.audioNormalize ?? true,
     removeMistakes: raw.removeMistakes ?? false,
@@ -89,7 +98,7 @@ function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
     fadeInOut: raw.fadeInOut ?? true,
     mirrorHorizontal: raw.mirrorHorizontal ?? false,
     introTitleCard: raw.introTitleCard ?? true,
-    timelineJson: raw.timelineJson ?? null,
+    timelineJson,
   }
 }
 
@@ -260,10 +269,16 @@ function clipMotionFromTimeline(
     fromTimeline === 'slide-left' ||
     fromTimeline === 'slide-right' ||
     fromTimeline === 'blur' ||
-    fromTimeline === 'flash'
+    fromTimeline === 'flash' ||
+    fromTimeline === 'shake' ||
+    fromTimeline === 'bounce'
   ) {
     return fromTimeline
   }
+  // Editor "None" was picked (transition is null then) — no motion.
+  const pick = (timelineJson as { timeline?: { transitionPick?: unknown } } | null)
+    ?.timeline?.transitionPick
+  if (typeof pick === 'number' && pick > 0 && !fromTimeline) return 'none'
   // Only use keyframing when no explicit zoom chip was chosen.
   if (options?.keyframing && (zoom === 'none' || zoom == null || zoom === '')) {
     if (options.keyframePreset === 'slow-zoom-out') return 'zoom-out'
@@ -546,6 +561,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         durationSeconds: source.durationSeconds,
         motion: clipMotionFromTimeline(options.timelineJson, options),
         timelineJson: options.timelineJson,
+        randomPool: options.randomPool,
         aspectRatio: options.aspectRatio,
         removeMistakes: Boolean(options.removeMistakes),
         onProgress: writeProgress,
@@ -790,6 +806,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         speedRamp: options.speedRamp,
         durationSeconds: source.durationSeconds,
         timelineJson: options.timelineJson,
+        randomPool: options.randomPool,
         motion: clipMotionFromTimeline(options.timelineJson, options),
         onProgress: writeProgress,
       })
@@ -984,6 +1001,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         durationSeconds: source.durationSeconds,
         motion: clipMotionFromTimeline(options.timelineJson, options),
         timelineJson: options.timelineJson,
+        randomPool: options.randomPool,
         aspectRatio: options.aspectRatio,
         removeMistakes: Boolean(options.removeMistakes),
         onProgress: writeProgress,

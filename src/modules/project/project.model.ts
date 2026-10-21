@@ -12,6 +12,8 @@ import {
   ZOOM_EFFECTS,
   PACING_LEVELS,
   PROJECT_STATUSES,
+  RANDOM_POOL_EFFECTS,
+  DEFAULT_RANDOM_POOL,
   SILENCE_LEVELS,
   SPEED_RAMPS,
 } from '../../constants/projects'
@@ -48,6 +50,10 @@ const optionsSchema = {
     type: String,
     enum: ZOOM_EFFECTS,
     default: 'none',
+  },
+  randomPool: {
+    type: [{ type: String, enum: RANDOM_POOL_EFFECTS }],
+    default: () => [...DEFAULT_RANDOM_POOL],
   },
   keepAudio: { type: Boolean, default: true },
   audioNormalize: { type: Boolean, default: true },

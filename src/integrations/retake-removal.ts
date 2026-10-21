@@ -1,4 +1,6 @@
+import path from 'path'
 import { detectSilenceInRange } from './ffmpeg'
+import { refineStretchedWords } from './groq-transcribe'
 import {
   mergeSpokenPhrases,
   splitCutsBySilence,
@@ -128,6 +130,34 @@ function thoughtLooksComplete(text: string) {
  * Split keep-cuts on real word gaps so flub + redo become separate segments.
  * Uses raw STT timings (not compacted) — gaps must survive.
  */
+/**
+ * Make split parts cover the whole cut: first starts at cut.start, last ends
+ * at cut.end, neighbours meet at the middle of their gap. Splitting is only
+ * for finding takes — it must never remove time by itself.
+ */
+function fillCut(parts: Array<{ start: number; end: number }>, cut: { start: number; end: number }) {
+  if (parts.length < 2) return [{ ...cut }]
+  const out = [...parts].sort((a, b) => a.start - b.start).map((p) => ({ ...p }))
+  out[0].start = cut.start
+  out[out.length - 1].end = cut.end
+  for (let i = 1; i < out.length; i++) {
+    const mid = (out[i - 1].end + out[i].start) / 2
+    out[i - 1].end = mid
+    out[i].start = mid
+  }
+  return out
+}
+
+function mergeTouchingCuts(cuts: Array<{ start: number; end: number }>) {
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
+    const last = out[out.length - 1]
+    if (last && cut.start <= last.end + 0.02) last.end = Math.max(last.end, cut.end)
+    else out.push({ ...cut })
+  }
+  return out
+}
+
 export function expandCutsByWordGaps(
   cuts: Array<{ start: number; end: number }>,
   words: TimedWord[],
@@ -140,17 +170,19 @@ export function expandCutsByWordGaps(
       out.push({ ...cut })
       continue
     }
+    const parts: Array<{ start: number; end: number }> = []
     let start = Math.max(cut.start, inside[0].start - 0.04)
     for (let i = 1; i < inside.length; i++) {
       const gap = inside[i].start - inside[i - 1].end
       if (gap >= minGap) {
         const end = Math.min(cut.end, inside[i - 1].end + 0.06)
-        if (end - start >= 0.22) out.push({ start, end })
+        if (end - start >= 0.22) parts.push({ start, end })
         start = Math.max(cut.start, inside[i].start - 0.04)
       }
     }
     const end = Math.min(cut.end, inside[inside.length - 1].end + 0.06)
-    if (end - start >= 0.22) out.push({ start, end })
+    if (end - start >= 0.22) parts.push({ start, end })
+    out.push(...fillCut(parts, cut))
   }
   return out.length ? out : cuts
 }
@@ -168,8 +200,7 @@ async function expandCutsBySilence(
     try {
       const holes = await detectSilenceInRange(inputPath, cut.start, cut.end)
       const parts = splitCutsBySilence([cut], holes, 0.26)
-      if (parts.length > 1) out.push(...parts)
-      else out.push({ ...cut })
+      out.push(...fillCut(parts, cut))
     } catch {
       out.push({ ...cut })
     }
@@ -252,12 +283,8 @@ export function trimDoubledTakeCuts(
         .join(' ')
       if (similarTakes(first, second, { nearby: true })) {
         const later = inside.slice(midCount)
-        const s = Math.max(0, later[0].start - 0.04)
-        const e = Math.min(
-          durationSeconds,
-          later[later.length - 1].end + 0.06,
-        )
-        out.push(e - s >= 0.8 ? { start: s, end: e } : cut)
+        const s = Math.max(cut.start, later[0].start - 0.04)
+        out.push(cut.end - s >= 0.8 ? { start: s, end: cut.end } : cut)
       } else {
         out.push(cut)
       }
@@ -282,7 +309,8 @@ export function trimDoubledTakeCuts(
         }
       }
     }
-    const kept = parts.filter((_, index) => keep[index])
+    const spans = fillCut(parts, cut)
+    const kept = spans.filter((_, index) => keep[index])
     if (kept.length && kept.length < parts.length) {
       out.push(...kept)
     } else {
@@ -497,6 +525,253 @@ export async function dropClosingRetake(
   return cuts
 }
 
+type TimeRange = { start: number; end: number }
+
+/** Lowercase word without punctuation — keeps short words (I, a, to). */
+function flubToken(word: string) {
+  return word.toLowerCase().replace(/[^a-z0-9']/g, '')
+}
+
+/** Short words people stutter on ("I I", "the the"). Content-word doubles like "very very" stay. */
+const STUTTER_WORDS = new Set([
+  'i', 'a', 'an', 'the', 'and', 'to', 'so', 'but', 'we', 'you', 'it',
+  'in', 'of', 'my', 'this', 'if', 'or', 'for', 'on', 'be', "i'm",
+  "it's", "we're", "you're", "that's", 'he', 'she', 'they', 'our', 'your',
+])
+
+/** Explicit "I messed up" cues spoken mid-take. Each is a token sequence. */
+const CORRECTION_CUES: string[][] = [
+  ['let', 'me', 'start', 'again'],
+  ['let', 'me', 'start', 'over'],
+  ['let', 'me', 'try', 'again'],
+  ['let', 'me', 'try', 'that', 'again'],
+  ['let', 'me', 'say', 'that', 'again'],
+  ['let', 'me', 'do', 'that', 'again'],
+  ['let', 'me', 'redo', 'that'],
+  ['let', 'me', 'redo'],
+  ['start', 'over'],
+  ['one', 'more', 'time'],
+  ['take', 'two'],
+  ['scratch', 'that'],
+  ['cut', 'that'],
+  ['my', 'bad'],
+  ['oops'],
+  ['sorry'],
+]
+
+/** Cues that correct the words right before them ("… I mean, …"). */
+const SELF_CORRECTION_CUES: string[][] = [
+  ['i', 'mean'],
+  ['i', 'meant'],
+  ['or', 'rather'],
+  ['no', 'wait'],
+]
+
+/** Words people say to restart a line ("…freetur- And this thing…"). */
+const RESTART_JOINERS = new Set(['and', 'so', 'okay', 'ok', 'sorry', 'again'])
+
+const FILLER_TOKENS = new Set(['um', 'umm', 'uh', 'uhh', 'er', 'ah', 'hmm', 'like'])
+
+/** "sorry for / about / to …" is real speech, not a flub cue. */
+const SORRY_CONTINUES = new Set(['for', 'about', 'to', 'that', 'if', 'but', 'guys'])
+
+function matchAt(tokens: string[], at: number, seq: string[]) {
+  if (at + seq.length > tokens.length) return false
+  for (let k = 0; k < seq.length; k++) {
+    if (tokens[at + k] !== seq[k]) return false
+  }
+  return true
+}
+
+/** Index of the first word of the current utterance (after a pause or sentence end). */
+function utteranceStart(words: TimedWord[], from: number, minPause = 0.45) {
+  let i = from
+  while (i > 0) {
+    const prev = words[i - 1]
+    if (words[i].start - prev.end >= minPause) break
+    if (/[.!?]$/.test(prev.word.trim())) break
+    i -= 1
+  }
+  return i
+}
+
+function subtractRanges(cuts: TimeRange[], drops: TimeRange[], minPiece = 0.12) {
+  if (!drops.length) return cuts
+  const sortedDrops = [...drops].sort((a, b) => a.start - b.start)
+  const out: TimeRange[] = []
+  for (const cut of cuts) {
+    let pieces: TimeRange[] = [{ ...cut }]
+    for (const drop of sortedDrops) {
+      const next: TimeRange[] = []
+      for (const piece of pieces) {
+        if (drop.end <= piece.start || drop.start >= piece.end) {
+          next.push(piece)
+          continue
+        }
+        if (drop.start - piece.start >= minPiece) {
+          next.push({ start: piece.start, end: drop.start })
+        }
+        if (piece.end - drop.end >= minPiece) {
+          next.push({ start: drop.end, end: piece.end })
+        }
+      }
+      pieces = next
+    }
+    out.push(...pieces)
+  }
+  return out
+}
+
+/**
+ * Word-level mistakes the take-matching passes miss:
+ * - stutters ("I I think", "the the")
+ * - restarts ("we went to the — we went to the store")
+ * - short false starts before a pause that the next phrase restarts
+ * - spoken correction cues ("sorry", "let me start again") + the flub before them
+ * Always keeps the later attempt.
+ */
+export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
+  const counts = { stutters: 0, restarts: 0, falseStarts: 0, cues: 0 }
+  const inCuts = allWords
+    .filter((word) => cuts.some((cut) => word.end > cut.start && word.start < cut.end))
+    .sort((a, b) => a.start - b.start)
+  const words = inCuts.filter((word) => flubToken(word.word))
+  const tokens = words.map((word) => flubToken(word.word))
+  if (words.length < 3) return { cuts, removedSeconds: 0, counts }
+
+  const drop = words.map(() => false)
+  const markRange = (from: number, to: number) => {
+    for (let k = from; k < to; k++) drop[k] = true
+  }
+
+  // 1) Correction cues — drop the flubbed utterance and the cue itself.
+  for (let i = 0; i < tokens.length; i++) {
+    const cue = CORRECTION_CUES.find((seq) => matchAt(tokens, i, seq))
+    if (!cue) continue
+    const cueEnd = i + cue.length
+    if (cue[0] === 'sorry' && cue.length === 1) {
+      const next = tokens[cueEnd]
+      const pauseAround =
+        (i > 0 && words[i].start - words[i - 1].end >= 0.2) ||
+        (cueEnd < words.length && words[cueEnd].start - words[cueEnd - 1].end >= 0.2)
+      if ((next && SORRY_CONTINUES.has(next)) || !pauseAround) continue
+    }
+    let from = utteranceStart(words, i)
+    // Cue said on its own ("… camera. | Sorry. | This phone …") — the flub is
+    // the utterance before it.
+    if (from === i && i > 0) from = utteranceStart(words, i - 1)
+    // Guard: never wipe a long stretch on one cue.
+    if (i - from > 14 || words[i].start - words[from].start > 7) {
+      markRange(i, cueEnd)
+    } else {
+      markRange(from, cueEnd)
+    }
+    counts.cues += 1
+    i = cueEnd - 1
+  }
+
+  // 1b) Self-correction — "this is nice. I mean, this is pretty nice."
+  // Only when the words after the cue restart words said just before it.
+  for (let i = 1; i < tokens.length; i++) {
+    const cue = SELF_CORRECTION_CUES.find((seq) => matchAt(tokens, i, seq))
+    if (!cue || drop[i]) continue
+    let after = i + cue.length
+    while (after < tokens.length && FILLER_TOKENS.has(tokens[after])) after += 1
+    if (after + 1 >= tokens.length) continue
+    for (let from = i - 2; from >= Math.max(0, i - 10); from--) {
+      if (tokens[from] === tokens[after] && tokens[from + 1] === tokens[after + 1]) {
+        markRange(from, after)
+        counts.cues += 1
+        break
+      }
+    }
+  }
+
+  // 2) Restarts + stutters — earlier attempt repeated within a few words.
+  for (let i = 0; i < tokens.length; i++) {
+    if (drop[i]) continue
+    for (let j = i + 1; j <= Math.min(tokens.length - 1, i + 8); j++) {
+      if (words[j].start - words[i].start > 6) break
+      let k = 0
+      while (j + k < tokens.length && i + k < j && tokens[i + k] === tokens[j + k]) {
+        k += 1
+      }
+      // Earlier attempt = the repeated words, plus at most one filler or
+      // cut-off word ("we went to th- we went to the store").
+      // Up to 3 extra words are fine when each is a filler, a connector
+      // ("freetur- And this thing…") or a cut-off word.
+      const extra = j - i - k
+      const redoWord = tokens[j + k] ?? ''
+      let extraIsFlub = extra <= 3
+      for (let e = i + k; e < j && extraIsFlub; e++) {
+        const tok = tokens[e]
+        const cutOff = /-$/.test(words[e].word.trim()) ||
+          (tok.length < redoWord.length && redoWord.startsWith(tok))
+        extraIsFlub = FILLER_TOKENS.has(tok) || RESTART_JOINERS.has(tok) || cutOff
+      }
+      if (extra > 1 && !words.slice(i + k, j).some((w) => /-$/.test(w.word.trim()))) {
+        // Several loose words without a cut-off is more likely real speech.
+        extraIsFlub = false
+      }
+      // Two-word repeats need a break before the redo so phrases like
+      // "again and again" stay.
+      const brokeOff = words[j].start - words[j - 1].end >= 0.15 || extra === 1
+      const restart = extraIsFlub && (k >= 3 || (k === 2 && brokeOff))
+      const stutter = k >= 1 && j === i + 1 && STUTTER_WORDS.has(tokens[i])
+      if (!restart && !stutter) continue
+      markRange(i, j)
+      if (stutter && !restart) counts.stutters += 1
+      else counts.restarts += 1
+      i = j - 1
+      break
+    }
+  }
+
+  // 3) False start — short unfinished phrase, pause, then the same opener.
+  for (let i = 0; i < words.length; i++) {
+    if (drop[i]) continue
+    let end = i
+    while (end + 1 < words.length && words[end + 1].start - words[end].end < 0.35) end += 1
+    const next = end + 1
+    const size = end - i + 1
+    if (
+      next < words.length &&
+      size <= 5 &&
+      !/[.!?]$/.test(words[end].word.trim()) &&
+      words[next].start - words[end].end <= 2.5
+    ) {
+      let k = 0
+      while (k < size && next + k < tokens.length && tokens[i + k] === tokens[next + k]) k += 1
+      if (k >= 2 || (k >= 1 && k === size)) {
+        markRange(i, next)
+        counts.falseStarts += 1
+      }
+    }
+    i = end
+  }
+
+  const ranges: TimeRange[] = []
+  for (let i = 0; i < words.length; i++) {
+    if (!drop[i]) continue
+    let j = i
+    while (j + 1 < words.length && drop[j + 1]) j += 1
+    const start = Math.max(0, words[i].start - 0.03)
+    const end =
+      j + 1 < words.length
+        ? Math.max(start, words[j + 1].start - 0.04)
+        : words[j].end + 0.05
+    if (end > start) ranges.push({ start, end })
+    i = j
+  }
+  if (!ranges.length) return { cuts, removedSeconds: 0, counts }
+
+  const next = subtractRanges(cuts, ranges)
+  if (!next.length) return { cuts, removedSeconds: 0, counts }
+  const length = (list: TimeRange[]) =>
+    list.reduce((sum, cut) => sum + Math.max(0, cut.end - cut.start), 0)
+  return { cuts: next, removedSeconds: Math.max(0, length(cuts) - length(next)), counts }
+}
+
 /**
  * Full retake cleanup pass used by talking-head and rapid-cut.
  */
@@ -522,23 +797,54 @@ export async function removeRetakes(input: {
   )
   const beforeCount = input.cuts.length
 
+  // Re-listen to spots where Whisper smoothed over a flub (one word stretched
+  // across a hidden restart) so the passes below can see it.
+  let words = input.words
+  try {
+    const refine = await refineStretchedWords(
+      input.inputPath,
+      input.words,
+      path.join(path.dirname(input.inputPath), '.cache', 'refine'),
+    )
+    words = refine.words
+    if (refine.refined) {
+      notes.push(`Re-checked ${refine.refined} unclear spot${refine.refined === 1 ? '' : 's'} in the transcript`)
+    }
+  } catch {
+    /* keep the original transcript */
+  }
+
+  // 0) Word-level flubs: stutters, restarts, false starts, "sorry / let me redo"
+  const flubs = dropFlubs(input.cuts, words)
+  const flubParts = [
+    flubs.counts.restarts && `${flubs.counts.restarts} restart${flubs.counts.restarts === 1 ? '' : 's'}`,
+    flubs.counts.falseStarts && `${flubs.counts.falseStarts} false start${flubs.counts.falseStarts === 1 ? '' : 's'}`,
+    flubs.counts.stutters && `${flubs.counts.stutters} stutter${flubs.counts.stutters === 1 ? '' : 's'}`,
+    flubs.counts.cues && `${flubs.counts.cues} spoken correction${flubs.counts.cues === 1 ? '' : 's'}`,
+  ].filter(Boolean)
+  if (flubParts.length) {
+    notes.push(
+      `Removed mistakes: ${flubParts.join(', ')} (−${flubs.removedSeconds.toFixed(1)}s)`,
+    )
+  }
+
   // 1) Expand merged flub+redo into separate segments
-  let cuts = expandCutsByWordGaps(input.cuts, input.words, 0.35)
+  let cuts = expandCutsByWordGaps(flubs.cuts, words, 0.35)
   cuts = await expandCutsBySilence(cuts, input.inputPath)
 
   // 2) In-cut consecutive similar parts → keep later
-  cuts = trimDoubledTakeCuts(cuts, input.words, input.durationSeconds)
+  cuts = trimDoubledTakeCuts(cuts, words, input.durationSeconds)
 
   // 3) Sentence-level duplicate phrases (across the whole timeline)
-  cuts = dropRepeatedPhrases(cuts, input.words)
+  cuts = dropRepeatedPhrases(cuts, words)
 
   // 4) Whole-cut duplicate takes → keep later
-  cuts = dropRepeatedTakes(cuts, input.words)
+  cuts = dropRepeatedTakes(cuts, words)
 
   // 5) Closing CTA filmed twice → keep first complete
   cuts = await dropClosingRetake(
     cuts,
-    input.words,
+    words,
     input.durationSeconds,
     input.inputPath,
   )
@@ -548,14 +854,17 @@ export async function removeRetakes(input: {
     return { cuts: input.cuts, dropped: 0, notes }
   }
 
-  // Merge tiny adjacent leftovers that aren't retakes
   cuts = [...cuts].sort((a, b) => a.start - b.start)
+  const keptParts = cuts.length
+  // Splits above are only for comparing takes — join pieces that still touch
+  // (and any overlapping input cuts) so nothing plays twice or jumps mid-line.
+  cuts = mergeTouchingCuts(cuts)
 
   const afterSeconds = cuts.reduce(
     (sum, cut) => sum + Math.max(0, cut.end - cut.start),
     0,
   )
-  const dropped = Math.max(0, beforeCount - cuts.length)
+  const dropped = Math.max(0, beforeCount - keptParts)
   // Also count expansions that then dropped (beforeCount may grow then shrink)
   const removedSeconds = Math.max(0, beforeSeconds - afterSeconds)
 

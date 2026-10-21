@@ -221,6 +221,64 @@ export async function transcribeSourceAudio(
   return result
 }
 
+/**
+ * Whisper on a whole video often "cleans up" a flub into one smooth sentence
+ * and stretches a single word over the hidden part ("features" 26.9→30.3s
+ * covering "freetur- And this thing has a ton of"). Re-transcribe just those
+ * spots on their own — short clips come back verbatim — and splice the words in.
+ */
+export async function refineStretchedWords(
+  inputPath: string,
+  words: TimedWord[],
+  tempDir: string,
+  opts: { maxWindows?: number; minWordSeconds?: number } = {},
+): Promise<{ words: TimedWord[]; refined: number }> {
+  if (!env.GROQ_API_KEY || words.length < 3) return { words, refined: 0 }
+  const sorted = [...words].sort((a, b) => a.start - b.start)
+  const minWord = opts.minWordSeconds ?? 1.0
+
+  // Window = the utterance around each stretched word (bounded by ≥0.5s gaps).
+  const windows: Array<{ start: number; end: number }> = []
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i].end - sorted[i].start < minWord) continue
+    let a = i
+    while (a > 0 && sorted[a].start - sorted[a - 1].end < 0.5 && sorted[i].start - sorted[a - 1].start < 8) a -= 1
+    let b = i
+    while (b + 1 < sorted.length && sorted[b + 1].start - sorted[b].end < 0.5 && sorted[b + 1].end - sorted[i].end < 4) b += 1
+    const start = Math.max(0, sorted[a].start - 0.2)
+    const end = sorted[b].end + 0.2
+    const last = windows[windows.length - 1]
+    if (last && start <= last.end) last.end = Math.max(last.end, end)
+    else windows.push({ start, end })
+  }
+  if (!windows.length) return { words, refined: 0 }
+
+  let out = sorted
+  let refined = 0
+  for (const win of windows.slice(0, opts.maxWindows ?? 6)) {
+    const slicePath = path.join(tempDir, `refine-${Date.now()}-${refined}.mp3`)
+    try {
+      fs.mkdirSync(tempDir, { recursive: true })
+      await extractAudioSlice(inputPath, slicePath, win.start, win.end - win.start)
+      const part = await transcribeWithGroq(slicePath, 'audio/mpeg', win.start)
+      const inside = out.filter((w) => w.start >= win.start && w.end <= win.end + 0.3)
+      // Only trust the re-take when it heard at least as much as before.
+      if (part.words.length < inside.length || !part.words.length) continue
+      const fresh = part.words.filter((w) => w.start < win.end + 0.3)
+      out = [
+        ...out.filter((w) => !inside.includes(w)),
+        ...fresh,
+      ].sort((a, b) => a.start - b.start)
+      refined += 1
+    } catch {
+      /* keep the original words for this window */
+    } finally {
+      if (fs.existsSync(slicePath)) fs.unlinkSync(slicePath)
+    }
+  }
+  return { words: out, refined }
+}
+
 async function transcribeUncached(
   inputPath: string,
   durationSeconds: number,

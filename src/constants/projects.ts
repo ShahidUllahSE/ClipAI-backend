@@ -59,6 +59,34 @@ export const ZOOM_EFFECTS = [
   'random',
 ] as const
 export type ZoomEffectId = (typeof ZOOM_EFFECTS)[number]
+/** Effects the client can include in the Randomize mix. */
+export const RANDOM_POOL_EFFECTS = [
+  'punch',
+  'zoom-in',
+  'zoom-out',
+  'ken-burns',
+  'fade',
+  'slide-left',
+  'slide-right',
+  'blur',
+  'flash',
+  'shake',
+  'bounce',
+] as const
+export type RandomPoolEffect = (typeof RANDOM_POOL_EFFECTS)[number]
+export const DEFAULT_RANDOM_POOL: RandomPoolEffect[] = [
+  'punch',
+  'zoom-in',
+  'zoom-out',
+  'ken-burns',
+]
+
+/** Valid, unique pool with at least 2 effects — otherwise the default mix. */
+export function normalizeRandomPool(raw: unknown): RandomPoolEffect[] {
+  if (!Array.isArray(raw)) return [...DEFAULT_RANDOM_POOL]
+  const pool = RANDOM_POOL_EFFECTS.filter((effect) => raw.includes(effect))
+  return pool.length >= 2 ? pool : [...DEFAULT_RANDOM_POOL]
+}
 export const CROP_PRESETS = [
   'none',
   'center',

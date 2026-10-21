@@ -1,4 +1,8 @@
-import type { EditingModeId, ProjectStatus } from '../../constants/projects'
+import type {
+  EditingModeId,
+  ProjectStatus,
+  RandomPoolEffect,
+} from '../../constants/projects'
 
 export interface ProjectOptionsDto {
   captions: boolean
@@ -24,6 +28,8 @@ export interface ProjectOptionsDto {
     | 'speaker-punch-in'
     | 'product-reveal-zoom'
   zoomEffect?: 'none' | 'punch' | 'zoom-in' | 'zoom-out' | 'ken-burns' | 'random'
+  /** Effects mixed by Randomize (≥2). */
+  randomPool?: RandomPoolEffect[]
   keepAudio: boolean
   audioNormalize: boolean
   /** Drop flubs / repeated takes (opt-in) */

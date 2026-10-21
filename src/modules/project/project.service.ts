@@ -5,6 +5,7 @@ import { env } from '../../config'
 import { HTTP_STATUS } from '../../constants/http'
 import {
   ACTIVE_PROCESS_STATUSES,
+  normalizeRandomPool,
   type EditingModeId,
   type ProjectStatus,
 } from '../../constants/projects'
@@ -36,6 +37,7 @@ function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
     keyframing: raw.keyframing ?? true,
     keyframePreset: raw.keyframePreset ?? 'speaker-punch-in',
     zoomEffect: raw.zoomEffect ?? 'none',
+    randomPool: normalizeRandomPool(raw.randomPool),
     keepAudio: raw.keepAudio ?? true,
     audioNormalize: raw.audioNormalize ?? true,
     removeMistakes: raw.removeMistakes ?? false,

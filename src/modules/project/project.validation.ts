@@ -10,6 +10,7 @@ import {
   EDITING_MODES,
   KEYFRAME_PRESETS,
   PACING_LEVELS,
+  RANDOM_POOL_EFFECTS,
   SILENCE_LEVELS,
   SPEED_RAMPS,
 } from '../../constants/projects'
@@ -37,6 +38,7 @@ export const projectOptionsSchema = z.object({
     .enum(['none', 'punch', 'zoom-in', 'zoom-out', 'ken-burns', 'random'])
     .optional()
     .default('none'),
+  randomPool: z.array(z.enum(RANDOM_POOL_EFFECTS)).optional(),
   keepAudio: z.boolean(),
   audioNormalize: z.boolean(),
   removeMistakes: z.boolean().optional().default(false),

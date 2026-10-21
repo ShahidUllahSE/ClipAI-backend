@@ -190,6 +190,8 @@ export async function processTalkingHead(input: {
   durationSeconds?: number
   motion?: ClipMotion
   timelineJson?: unknown
+  /** Effects mixed by Randomize */
+  randomPool?: readonly ClipMotion[]
   aspectRatio?: '9:16' | '1:1' | '16:9'
   /** Opt-in flub / retake removal */
   removeMistakes?: boolean
@@ -442,8 +444,8 @@ export async function processTalkingHead(input: {
   // Options "Randomize" wins over a single editor transition (often zoom-in).
   const perCutMotions =
     motion === 'random'
-      ? buildRandomCutMotions(cuts.length)
-      : perCutMotionsFromTimeline(input.timelineJson, cuts.length)
+      ? buildRandomCutMotions(cuts.length, input.randomPool)
+      : perCutMotionsFromTimeline(input.timelineJson, cuts.length, input.randomPool)
   const extraZoomByCut = extraZoomByCutFromTimeline(input.timelineJson, cuts)
   await renderJumpCutVideo({
     inputPath: input.inputPath,
@@ -452,6 +454,7 @@ export async function processTalkingHead(input: {
     keepAudio: input.keepAudio,
     motion,
     perCutMotions,
+    randomPool: input.randomPool,
     extraZoomByCut,
     aspectRatio,
     onProgress: (ratio) => report(76 + ratio * 18, 'Cutting and exporting'),

@@ -186,6 +186,8 @@ export async function processAsmrUnboxing(input: {
   speedRamp?: 'off' | 'light' | 'medium' | 'aggressive'
   durationSeconds?: number
   timelineJson?: unknown
+  /** Effects mixed by Randomize */
+  randomPool?: readonly ClipMotion[]
   motion?: ClipMotion
   onProgress?: (percent: number, note?: string) => void
 }): Promise<AsmrResult> {
@@ -321,7 +323,7 @@ export async function processAsmrUnboxing(input: {
   }
 
   input.onProgress?.(76, 'Cutting and exporting')
-  const perCutMotions = perCutMotionsFromTimeline(input.timelineJson, cuts.length)
+  const perCutMotions = perCutMotionsFromTimeline(input.timelineJson, cuts.length, input.randomPool)
   const extraZoomByCut = extraZoomByCutFromTimeline(input.timelineJson, cuts)
   await renderJumpCutVideo({
     inputPath: input.inputPath,
@@ -330,6 +332,7 @@ export async function processAsmrUnboxing(input: {
     keepAudio: input.keepAudio,
     motion: input.motion ?? 'none',
     perCutMotions,
+    randomPool: input.randomPool,
     extraZoomByCut,
     onProgress: (ratio) =>
       input.onProgress?.(76 + ratio * 18, 'Cutting and exporting'),

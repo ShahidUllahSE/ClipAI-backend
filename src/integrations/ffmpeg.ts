@@ -557,6 +557,8 @@ export type ClipMotion =
   | 'slide-right'
   | 'blur'
   | 'flash'
+  | 'shake'
+  | 'bounce'
 
 
 export type SubjectFocus = { x: number; y: number }
@@ -735,6 +737,25 @@ function motionScaleCrop(
     return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,crop=${w}:${h}:${xExpr}:${yExpr},setsar=1`
   }
 
+  /** Quick zoom in and back out at the start of the cut (beat hit). */
+  const applyBounce = (fx: number, fy: number) => {
+    const bounceDur = Math.max(0.3, Math.min(0.5, duration * 0.4)).toFixed(3)
+    const a = Math.max(1, zMul)
+    const zExpr = `${a.toFixed(4)}*(1+0.22*sin(PI*min(1\\,t/${bounceDur})))`
+    const crop = `crop=${w}:${h}:${cropAround(fx, fy)}`
+    return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,${crop},setsar=1`
+  }
+
+  /** Handheld camera shake that settles within ~0.5s. */
+  const applyShake = () => {
+    const shakeDur = Math.max(0.35, Math.min(0.6, duration * 0.5)).toFixed(3)
+    const s = (1.1 * Math.max(1, zMul)).toFixed(4)
+    const decay = `max(0\\,1-t/${shakeDur})`
+    const x = `(iw-ow)/2+(iw-ow)/2*0.85*sin(t*52)*${decay}`
+    const y = `(ih-oh)/2+(ih-oh)/2*0.85*cos(t*41)*${decay}`
+    return `${cover},scale=iw*${s}:ih*${s}:flags=fast_bilinear,crop=${w}:${h}:x='${x}':y='${y}',setsar=1`
+  }
+
   /** Snap punch-in on every cut — short and obvious, not a static crop. */
   const applyPunch = (fx: number, fy: number) => {
     const punchDur = Math.max(0.18, Math.min(0.32, duration * 0.28)).toFixed(3)
@@ -745,6 +766,15 @@ function motionScaleCrop(
     return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,${crop},setsar=1`
   }
 
+  /**
+   * Blur that clears over `d` seconds. gblur can't animate sigma, so a blurred
+   * copy is laid over the frame and faded out (labels are unique per cut).
+   */
+  const blurIn = (base: string, d: string) => {
+    const tag = `bl${index}`
+    return `${base},split=2[${tag}a][${tag}b];[${tag}b]gblur=sigma=14,format=yuva420p,fade=t=out:st=0:d=${d}:alpha=1[${tag}c];[${tag}a][${tag}c]overlay=format=auto,format=yuv420p`
+  }
+
   if (motion === 'none' || motion === 'random') return apply(1, 0.5, 0.5)
 
   // Portrait source: overall = the original 9:16 frame. Do not pan.
@@ -753,6 +783,8 @@ function motionScaleCrop(
     if (motion === 'zoom-out') return applyLive(1.62, 1, 0.5, 0.5)
     if (motion === 'ken-burns') return applyKenBurns(0.58, 0.38)
     if (motion === 'punch') return applyPunch(0.5, 0.46)
+    if (motion === 'bounce') return applyBounce(0.5, 0.46)
+    if (motion === 'shake') return applyShake()
     if (motion === 'fade') {
       const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
       const base = apply(1, 0.5, 0.5)
@@ -768,7 +800,7 @@ function motionScaleCrop(
     }
     if (motion === 'blur') {
       const d = Math.min(0.32, Math.max(0.16, duration * 0.28)).toFixed(2)
-      return `${apply(1, 0.5, 0.5)},gblur=sigma='max(0.01\\,5*(1-min(1\\,t/${d})))'`
+      return blurIn(apply(1, 0.5, 0.5), d)
     }
     if (motion === 'flash') {
       const d = Math.min(0.16, Math.max(0.1, duration * 0.2)).toFixed(2)
@@ -790,6 +822,8 @@ function motionScaleCrop(
   if (motion === 'zoom-out') return applyLive(1.62, 1, scene.x, 0.5)
   if (motion === 'ken-burns') return applyKenBurns(speaker.x, speaker.y)
   if (motion === 'punch') return applyPunch(speaker.x, speaker.y)
+  if (motion === 'bounce') return applyBounce(speaker.x, speaker.y)
+  if (motion === 'shake') return applyShake()
   if (motion === 'fade') {
     const fade = Math.min(0.28, Math.max(0.25, duration) * 0.25).toFixed(2)
     const base = apply(1, scene.x, 0.5)
@@ -805,7 +839,7 @@ function motionScaleCrop(
   }
   if (motion === 'blur') {
     const d = Math.min(0.32, Math.max(0.16, duration * 0.28)).toFixed(2)
-    return `${apply(1, scene.x, 0.5)},gblur=sigma='max(0.01\\,5*(1-min(1\\,t/${d})))'`
+    return blurIn(apply(1, scene.x, 0.5), d)
   }
   if (motion === 'flash') {
     const d = Math.min(0.16, Math.max(0.1, duration * 0.2)).toFixed(2)
@@ -1022,6 +1056,8 @@ export async function renderJumpCutVideo(input: {
   keepAudio: boolean
   motion?: ClipMotion
   perCutMotions?: ClipMotion[]
+  /** Effects mixed by Randomize (default: punch / zoom in / zoom out / Ken Burns) */
+  randomPool?: readonly ClipMotion[]
   extraZoomByCut?: number[]
   aspectRatio?: '9:16' | '1:1' | '16:9'
   onProgress?: (ratio: number) => void
@@ -1046,9 +1082,13 @@ export async function renderJumpCutVideo(input: {
     return
   }
 
-  if (motion === 'random' || perCutMotions?.some((item) => item === 'random')) {
-    // Shuffle round-robin: every 4 keep-cuts includes punch, zoom-in, zoom-out, Ken Burns.
-    perCutMotions = buildRandomCutMotions(cuts.length)
+  const needsRandom =
+    perCutMotions?.length === cuts.length
+      ? perCutMotions.some((item) => item === 'random')
+      : motion === 'random'
+  if (needsRandom) {
+    // Shuffle round-robin: every block of cuts uses each pool effect once.
+    perCutMotions = buildRandomCutMotions(cuts.length, input.randomPool)
     motion = perCutMotions[0] ?? 'zoom-in'
   }
 

@@ -26,10 +26,15 @@ export const RANDOM_CLIP_MOTION_POOL: ClipMotion[] = [
   'ken-burns',
 ]
 
-/** Shuffle round-robin so every block of 4 cuts includes all four effects. */
-export function buildRandomCutMotions(cutCount: number): ClipMotion[] {
+/** Shuffle round-robin so every block of N cuts uses each pool effect once. */
+export function buildRandomCutMotions(
+  cutCount: number,
+  randomPool?: readonly ClipMotion[],
+): ClipMotion[] {
   if (cutCount < 1) return []
-  const pool = [...RANDOM_CLIP_MOTION_POOL]
+  const pool = [
+    ...(randomPool && randomPool.length >= 2 ? randomPool : RANDOM_CLIP_MOTION_POOL),
+  ]
   const out: ClipMotion[] = []
   for (let i = 0; i < cutCount; i++) {
     if (i % pool.length === 0) {
@@ -70,11 +75,28 @@ function mapFx(value: unknown): ClipMotion | null {
     value === 'slide-left' ||
     value === 'slide-right' ||
     value === 'blur' ||
-    value === 'flash'
+    value === 'flash' ||
+    value === 'shake' ||
+    value === 'bounce'
   ) {
     return value
   }
   return null
+}
+
+/**
+ * Drop editor per-clip effects (Apply to all / Randomize) so an explicit
+ * zoomEffect option is the only motion source. Other timeline data is kept.
+ */
+export function stripClipEffects(timelineJson: unknown): unknown {
+  const json = asJson(timelineJson)
+  if (!json) return timelineJson
+  const clear = { applyClipEffects: false, randomizeClipEffects: false, clipEffects: [] }
+  return {
+    ...json,
+    ...(json.timeline ? { timeline: { ...json.timeline, ...clear } } : {}),
+    ...(json.output ? { output: { ...json.output, ...clear } } : {}),
+  }
 }
 
 export function isApplyClipEffects(timelineJson: unknown): boolean {
@@ -95,11 +117,12 @@ export function hasZoomKeyframes(timelineJson: unknown): boolean {
 export function perCutMotionsFromTimeline(
   timelineJson: unknown,
   cutCount: number,
+  randomPool?: readonly ClipMotion[],
 ): ClipMotion[] | undefined {
   if (cutCount < 1) return undefined
   // Editor "Randomize on all" — expand across jump-cut keep-segments (not the few editor clips).
   if (wantsRandomClipEffects(timelineJson)) {
-    return buildRandomCutMotions(cutCount)
+    return buildRandomCutMotions(cutCount, randomPool)
   }
   if (!isApplyClipEffects(timelineJson)) return undefined
   const json = asJson(timelineJson)
@@ -114,7 +137,7 @@ export function perCutMotionsFromTimeline(
     // Prefer a full random mix when the saved list is shorter than keep-cuts
     // (editor only had a few segments when Randomize was clicked).
     if (mapped.length < cutCount && new Set(mapped).size > 1) {
-      return buildRandomCutMotions(cutCount)
+      return buildRandomCutMotions(cutCount, randomPool)
     }
     return Array.from(
       { length: cutCount },
@@ -127,7 +150,7 @@ export function perCutMotionsFromTimeline(
     mapFx(json?.timeline?.transition?.type) ??
     mapFx(json?.output?.transition?.type)
   if (!chosen || chosen === 'none') return undefined
-  if (chosen === 'random') return buildRandomCutMotions(cutCount)
+  if (chosen === 'random') return buildRandomCutMotions(cutCount, randomPool)
   return Array.from({ length: cutCount }, () => chosen)
 }
 
