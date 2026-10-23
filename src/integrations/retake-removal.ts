@@ -851,17 +851,28 @@ export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
     if (!drop[i]) continue
     let j = i
     while (j + 1 < words.length && drop[j + 1]) j += 1
-    const start = Math.max(0, words[i].start - 0.03)
-    const end =
-      j + 1 < words.length
-        ? Math.max(start, words[j + 1].start - 0.04)
-        : words[j].end + 0.05
-    if (end > start) ranges.push({ start, end })
+    // Whisper often packs a stutter flush against the redo
+    // ("because," end === next "because" start). Ending at next.start-0.04
+    // only shaved ~0.05–0.1s and left both words audible.
+    const start = Math.max(0, words[i].start - 0.06)
+    let end: number
+    if (j + 1 < words.length) {
+      const nextStart = words[j + 1].start
+      const droppedEnd = words[j].end
+      // Cut through the full dropped word(s), up to the kept word's start.
+      end = Math.max(droppedEnd, Math.min(nextStart, droppedEnd + 0.1))
+      end = Math.min(end, nextStart)
+      // Tiny / zero-duration Whisper spans — still remove up to the redo.
+      if (end - start < 0.08) end = nextStart
+    } else {
+      end = words[j].end + 0.08
+    }
+    if (end > start + 0.04) ranges.push({ start, end })
     i = j
   }
   if (!ranges.length) return { cuts, removedSeconds: 0, counts }
 
-  const next = subtractRanges(cuts, ranges)
+  const next = subtractRanges(cuts, ranges, 0.08)
   if (!next.length) return { cuts, removedSeconds: 0, counts }
   const length = (list: TimeRange[]) =>
     list.reduce((sum, cut) => sum + Math.max(0, cut.end - cut.start), 0)
