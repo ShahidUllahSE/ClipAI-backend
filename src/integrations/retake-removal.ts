@@ -40,10 +40,17 @@ export function takeTokens(text: string) {
     .filter((word) => word.length > 2)
 }
 
-function sequenceOverlap(a: string[], b: string[]) {
+/** Keep short words too — needed for 2-word redos like "this towel this towel". */
+function takeTokensLoose(text: string) {
+  return normalizeTakeText(text)
+    .split(' ')
+    .filter(Boolean)
+}
+
+function sequenceOverlap(a: string[], b: string[], minLen = 3) {
   const short = a.length <= b.length ? a : b
   const long = a.length <= b.length ? b : a
-  if (short.length < 3) return 0
+  if (short.length < minLen) return 0
   let best = 0
   for (let i = 0; i <= long.length - short.length; i++) {
     let hit = 0
@@ -76,6 +83,27 @@ export function similarTakes(
 ) {
   const ta = takeTokens(a)
   const tb = takeTokens(b)
+  const la = takeTokensLoose(a)
+  const lb = takeTokensLoose(b)
+  const na = normalizeTakeText(a)
+  const nb = normalizeTakeText(b)
+
+  // Nearby short redos: exact / near-exact 2+ word phrases.
+  if (opts?.nearby && la.length >= 2 && lb.length >= 2) {
+    if (na === nb) return true
+    if (la.length <= 6 && lb.length <= 6 && (na.includes(nb) || nb.includes(na))) {
+      return true
+    }
+    if (
+      la[0] === lb[0] &&
+      la[1] === lb[1] &&
+      Math.min(la.length, lb.length) <= 5
+    ) {
+      return true
+    }
+    if (sequenceOverlap(la, lb, 2) >= 0.85) return true
+  }
+
   if (ta.length < 3 || tb.length < 3) return false
   const sa = new Set(ta)
   const sb = new Set(tb)
@@ -85,8 +113,6 @@ export function similarTakes(
   }
   const union = sa.size + sb.size - inter
   const jaccard = union > 0 ? inter / union : 0
-  const na = normalizeTakeText(a)
-  const nb = normalizeTakeText(b)
   const contained =
     Math.min(ta.length, tb.length) >= 4 &&
     (na.includes(nb) || nb.includes(na))
@@ -99,7 +125,8 @@ export function similarTakes(
       contained ||
       seq >= 0.55 ||
       samePrefix(ta, tb, 4) ||
-      (samePrefix(ta, tb, 3) && Math.min(ta.length, tb.length) >= 4)
+      (samePrefix(ta, tb, 3) && Math.min(ta.length, tb.length) >= 4) ||
+      (samePrefix(ta, tb, 2) && Math.min(ta.length, tb.length) >= 3)
     )
   }
   // Distant pairs stay stricter so unique lines across the video aren't wiped.
@@ -221,10 +248,13 @@ export function dropRepeatedTakes(
   for (let later = sorted.length - 1; later >= 1; later -= 1) {
     if (!keep[later]) continue
     const laterText = cutText(sorted[later], words)
-    if (takeTokens(laterText).length < 3) continue
+    const laterLoose = takeTokensLoose(laterText).length
+    // Nearby cuts can be short 2-word redos; distant still need 3 content tokens.
+    if (laterLoose < 2) continue
     for (let earlier = 0; earlier < later; earlier += 1) {
       if (!keep[earlier]) continue
       const nearby = isNearbyPair(sorted[earlier].end, sorted[later].start)
+      if (!nearby && takeTokens(laterText).length < 3) continue
       if (
         similarTakes(cutText(sorted[earlier], words), laterText, { nearby })
       ) {
@@ -295,7 +325,7 @@ export function trimDoubledTakeCuts(
     for (let later = parts.length - 1; later >= 1; later -= 1) {
       if (!keep[later]) continue
       const laterText = cutText(parts[later], words)
-      if (takeTokens(laterText).length < 3) continue
+      if (takeTokensLoose(laterText).length < 2) continue
       for (let earlier = 0; earlier < later; earlier += 1) {
         if (!keep[earlier]) continue
         // Prefer adjacent / nearby pairs (same retake burst)
@@ -532,11 +562,16 @@ function flubToken(word: string) {
   return word.toLowerCase().replace(/[^a-z0-9']/g, '')
 }
 
-/** Short words people stutter on ("I I", "the the"). Content-word doubles like "very very" stay. */
+/** Function-word stutters always drop. Content doubles ("soft soft") also drop when adjacent. */
 const STUTTER_WORDS = new Set([
   'i', 'a', 'an', 'the', 'and', 'to', 'so', 'but', 'we', 'you', 'it',
   'in', 'of', 'my', 'this', 'if', 'or', 'for', 'on', 'be', "i'm",
   "it's", "we're", "you're", "that's", 'he', 'she', 'they', 'our', 'your',
+])
+
+/** Intentional emphasis pairs we leave alone ("no no", "bye bye"). */
+const KEEP_DOUBLE_WORDS = new Set([
+  'no', 'yes', 'bye', 'hey', 'hi', 'ha', 'oh', 'wow', 'yay',
 ])
 
 /** Explicit "I messed up" cues spoken mid-take. Each is a token sequence. */
@@ -624,7 +659,8 @@ function subtractRanges(cuts: TimeRange[], drops: TimeRange[], minPiece = 0.12) 
 
 /**
  * Word-level mistakes the take-matching passes miss:
- * - stutters ("I I think", "the the")
+ * - stutters ("I I think", "the the", "soft soft")
+ * - 2-word immediate redos ("hand towels hand towels")
  * - restarts ("we went to the — we went to the store")
  * - short false starts before a pause that the next phrase restarts
  * - spoken correction cues ("sorry", "let me start again") + the flub before them
@@ -713,11 +749,20 @@ export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
         // Several loose words without a cut-off is more likely real speech.
         extraIsFlub = false
       }
-      // Two-word repeats need a break before the redo so phrases like
-      // "again and again" stay.
-      const brokeOff = words[j].start - words[j - 1].end >= 0.15 || extra === 1
-      const restart = extraIsFlub && (k >= 3 || (k === 2 && brokeOff))
-      const stutter = k >= 1 && j === i + 1 && STUTTER_WORDS.has(tokens[i])
+      // Two-word redos: allow with a short break, or with zero gap words
+      // ("hand towels hand towels"). "again and again" has extra filler "and"
+      // so it does not match (extraIsFlub becomes false).
+      const brokeOff =
+        words[j].start - words[j - 1].end >= 0.12 || extra === 1 || extra === 0
+      const restart =
+        extraIsFlub && (k >= 3 || (k >= 2 && brokeOff) || (k === 2 && extra === 0))
+      // Adjacent doubles: "I I", "the the", and content "soft soft".
+      const stutter =
+        k >= 1 &&
+        j === i + 1 &&
+        tokens[i] === tokens[j] &&
+        !KEEP_DOUBLE_WORDS.has(tokens[i]) &&
+        (STUTTER_WORDS.has(tokens[i]) || tokens[i].length >= 2)
       if (!restart && !stutter) continue
       markRange(i, j)
       if (stutter && !restart) counts.stutters += 1
@@ -742,7 +787,8 @@ export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
     ) {
       let k = 0
       while (k < size && next + k < tokens.length && tokens[i + k] === tokens[next + k]) k += 1
-      if (k >= 2 || (k >= 1 && k === size)) {
+      // Catch 2-word false starts ("this towel … this towel …") and full short redos.
+      if (k >= 2 || (k >= 1 && k === size) || (k >= 1 && size <= 2)) {
         markRange(i, next)
         counts.falseStarts += 1
       }
