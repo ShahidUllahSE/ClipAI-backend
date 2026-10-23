@@ -10,7 +10,8 @@ import { AppError } from '../../utils/AppError'
 import { UploadModel } from './upload.model'
 import { UploadSessionModel } from './upload-session.model'
 
-const CHUNK_SIZE = 20 * 1024 * 1024
+// Keep chunks under common reverse-proxy limits (nginx often defaults to 1–10MB).
+const CHUNK_SIZE = 5 * 1024 * 1024
 const CHUNK_REQUEST_LIMIT = CHUNK_SIZE + 1024 * 1024
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
 
@@ -112,14 +113,45 @@ function cleanupStaleChunkFiles() {
   }
 }
 
+function mimeFromFilename(filename: string) {
+  const lower = filename.toLowerCase()
+  if (lower.endsWith('.mp4')) return 'video/mp4'
+  if (lower.endsWith('.mov')) return 'video/quicktime'
+  if (lower.endsWith('.webm')) return 'video/webm'
+  return ''
+}
+
 function validateVideo(mimeType: string, filename: string) {
-  const allowedMime = UPLOAD_LIMITS.acceptMime.includes(mimeType as never)
   const allowedExtension = /\.(mp4|mov|webm)$/i.test(filename)
-  if (!allowedMime || !allowedExtension) {
+  if (!allowedExtension) {
     throw new AppError(
       'Unsupported video format. Use MP4, MOV, or WebM.',
       HTTP_STATUS.BAD_REQUEST,
     )
+  }
+  // Prefer browser mime when known; otherwise infer from extension
+  // (some phones send empty or application/octet-stream).
+  if (UPLOAD_LIMITS.acceptMime.includes(mimeType as never)) return mimeType
+  const fromExt = mimeFromFilename(filename)
+  if (UPLOAD_LIMITS.acceptMime.includes(fromExt as never)) return fromExt
+  throw new AppError(
+    'Unsupported video format. Use MP4, MOV, or WebM.',
+    HTTP_STATUS.BAD_REQUEST,
+  )
+}
+
+function moveChunkFile(fromPath: string, toPath: string) {
+  try {
+    fs.renameSync(fromPath, toPath)
+  } catch (error) {
+    const code =
+      error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code)
+        : ''
+    // Cross-device renames fail with EXDEV — copy then remove instead.
+    if (code !== 'EXDEV') throw error
+    fs.copyFileSync(fromPath, toPath)
+    removeQuiet(fromPath)
   }
 }
 
@@ -211,7 +243,7 @@ export const uploadService = {
     },
   ) {
     cleanupStaleChunkFiles()
-    validateVideo(input.mimeType, input.filename)
+    const mimeType = validateVideo(input.mimeType, input.filename)
     if (!input.fingerprint.trim() || input.fingerprint.length > 500) {
       throw new AppError('Invalid upload fingerprint.', HTTP_STATUS.BAD_REQUEST)
     }
@@ -262,8 +294,9 @@ export const uploadService = {
     if (existing) {
       const metadataMatches =
         existing.originalFilename === input.filename &&
-        existing.mimeType === input.mimeType &&
-        existing.totalSize === input.totalSize
+        existing.mimeType === mimeType &&
+        existing.totalSize === input.totalSize &&
+        existing.chunkSize === CHUNK_SIZE
       const chunksOnThisMachine =
         existing.uploadedChunks.length === 0 ||
         existing.uploadedChunks.every((index) =>
@@ -274,6 +307,7 @@ export const uploadService = {
         await existing.save()
         return { session: publicSession(existing) }
       }
+      // Drop stale sessions (wrong chunk size, missing parts, metadata drift).
       removeQuiet(sessionDir(existing._id.toString()))
       await existing.deleteOne()
     }
@@ -282,7 +316,7 @@ export const uploadService = {
       userId,
       fingerprint: input.fingerprint,
       originalFilename: input.filename,
-      mimeType: input.mimeType,
+      mimeType,
       totalSize: input.totalSize,
       durationSeconds: input.durationSeconds,
       chunkSize: CHUNK_SIZE,
@@ -340,7 +374,7 @@ export const uploadService = {
     fs.mkdirSync(dir, { recursive: true })
     const destination = chunkPath(sessionId, index)
     removeQuiet(destination)
-    fs.renameSync(file.path, destination)
+    moveChunkFile(file.path, destination)
 
     session.uploadedChunks = Array.from(
       new Set([...session.uploadedChunks, index]),
