@@ -21,13 +21,19 @@ export function createApp() {
     '/uploads',
     (req, res, next) => {
       res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+      // Range + short cache so finished MP4s start playing quickly on revisit.
+      // No `immutable` — retries overwrite the same output filename.
+      if (/\.(mp4|mov|webm)$/i.test(req.path)) {
+        res.setHeader('Accept-Ranges', 'bytes')
+        res.setHeader('Cache-Control', 'public, max-age=120')
+      }
       if ('download' in req.query) {
         const raw =
           typeof req.query.filename === 'string' && req.query.filename.trim()
             ? req.query.filename.trim()
             : path.basename(req.path) || 'video.mp4'
         const ascii = raw
-          .replace(/[^\x20-\x7E]/g, '_')
+          .replace(/[^\x20-\x7E]+/g, '_')
           .replace(/"/g, '_')
           .slice(0, 160)
         const encoded = encodeURIComponent(raw.slice(0, 160))
@@ -35,10 +41,11 @@ export function createApp() {
           'Content-Disposition',
           `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`,
         )
+        res.setHeader('Cache-Control', 'private, no-store')
       }
       next()
     },
-    express.static(uploadsDir, { acceptRanges: true }),
+    express.static(uploadsDir, { acceptRanges: true, fallthrough: true }),
   )
 
   app.use(
