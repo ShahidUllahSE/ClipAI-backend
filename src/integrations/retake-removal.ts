@@ -723,7 +723,68 @@ export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
     }
   }
 
-  // 2) Restarts + stutters — earlier attempt repeated within a few words.
+  // 2a) Adjacent doubles — "because because", "knowing knowing", "soft soft".
+  // Whisper often keeps punctuation on the first token ("because,"); flubToken
+  // already strips that so these compare equal.
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (drop[i] || drop[i + 1]) continue
+    if (tokens[i] !== tokens[i + 1]) continue
+    if (KEEP_DOUBLE_WORDS.has(tokens[i])) continue
+    if (!(STUTTER_WORDS.has(tokens[i]) || tokens[i].length >= 2)) continue
+    // Only treat as a stutter when the two starts are close (same burst).
+    if (words[i + 1].start - words[i].start > 1.8) continue
+    markRange(i, i + 1)
+    counts.stutters += 1
+  }
+
+  // 2b) N-gram redos with optional junk in between —
+  // "this thing has, this has" / "hand towels hand towels".
+  for (let i = 0; i < tokens.length; i++) {
+    if (drop[i]) continue
+    for (let n = 4; n >= 1; n -= 1) {
+      if (i + n > tokens.length) continue
+      const maxJ = Math.min(tokens.length - n, i + n + 5)
+      for (let j = i + n; j <= maxJ; j++) {
+        if (drop[j]) continue
+        if (words[j].start - words[i].start > 5) break
+        let same = true
+        for (let t = 0; t < n; t++) {
+          if (tokens[i + t] !== tokens[j + t]) {
+            same = false
+            break
+          }
+        }
+        if (!same) continue
+        // Single-word distant repeats are often real speech ("that … that").
+        // Require adjacent-ish for n=1, or a content word + short gap.
+        const intervening = j - (i + n)
+        if (n === 1) {
+          if (KEEP_DOUBLE_WORDS.has(tokens[i])) continue
+          if (intervening > 3) continue
+          if (
+            intervening > 0 &&
+            tokens[i].length < 3 &&
+            !STUTTER_WORDS.has(tokens[i])
+          ) {
+            continue
+          }
+          // "this thing has, this has" — first "this" repeats after 2 words.
+          // Allow when the span is short.
+          if (intervening >= 1 && words[j].start - words[i].end > 2.2) continue
+        } else if (intervening > 4) {
+          continue
+        }
+        markRange(i, j)
+        if (n === 1 && intervening === 0) counts.stutters += 1
+        else counts.restarts += 1
+        i = j - 1
+        n = 0
+        break
+      }
+    }
+  }
+
+  // 2c) Classic restart with fillers / cut-offs between attempts.
   for (let i = 0; i < tokens.length; i++) {
     if (drop[i]) continue
     for (let j = i + 1; j <= Math.min(tokens.length - 1, i + 8); j++) {
@@ -732,41 +793,30 @@ export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
       while (j + k < tokens.length && i + k < j && tokens[i + k] === tokens[j + k]) {
         k += 1
       }
-      // Earlier attempt = the repeated words, plus at most one filler or
-      // cut-off word ("we went to th- we went to the store").
-      // Up to 3 extra words are fine when each is a filler, a connector
-      // ("freetur- And this thing…") or a cut-off word.
       const extra = j - i - k
       const redoWord = tokens[j + k] ?? ''
       let extraIsFlub = extra <= 3
       for (let e = i + k; e < j && extraIsFlub; e++) {
         const tok = tokens[e]
-        const cutOff = /-$/.test(words[e].word.trim()) ||
+        const cutOff =
+          /-$/.test(words[e].word.trim()) ||
           (tok.length < redoWord.length && redoWord.startsWith(tok))
         extraIsFlub = FILLER_TOKENS.has(tok) || RESTART_JOINERS.has(tok) || cutOff
       }
-      if (extra > 1 && !words.slice(i + k, j).some((w) => /-$/.test(w.word.trim()))) {
-        // Several loose words without a cut-off is more likely real speech.
+      if (
+        extra > 1 &&
+        !words.slice(i + k, j).some((w) => /-$/.test(w.word.trim()))
+      ) {
         extraIsFlub = false
       }
-      // Two-word redos: allow with a short break, or with zero gap words
-      // ("hand towels hand towels"). "again and again" has extra filler "and"
-      // so it does not match (extraIsFlub becomes false).
       const brokeOff =
         words[j].start - words[j - 1].end >= 0.12 || extra === 1 || extra === 0
       const restart =
-        extraIsFlub && (k >= 3 || (k >= 2 && brokeOff) || (k === 2 && extra === 0))
-      // Adjacent doubles: "I I", "the the", and content "soft soft".
-      const stutter =
-        k >= 1 &&
-        j === i + 1 &&
-        tokens[i] === tokens[j] &&
-        !KEEP_DOUBLE_WORDS.has(tokens[i]) &&
-        (STUTTER_WORDS.has(tokens[i]) || tokens[i].length >= 2)
-      if (!restart && !stutter) continue
+        extraIsFlub &&
+        (k >= 3 || (k >= 2 && brokeOff) || (k === 2 && extra === 0))
+      if (!restart) continue
       markRange(i, j)
-      if (stutter && !restart) counts.stutters += 1
-      else counts.restarts += 1
+      counts.restarts += 1
       i = j - 1
       break
     }
