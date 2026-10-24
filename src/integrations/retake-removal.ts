@@ -1,6 +1,7 @@
 import path from 'path'
 import { detectSilenceInRange } from './ffmpeg'
 import { refineStretchedWords } from './groq-transcribe'
+import { measureLoudness, type Loudness } from './speech-activity'
 import {
   mergeSpokenPhrases,
   splitCutsBySilence,
@@ -657,6 +658,117 @@ function subtractRanges(cuts: TimeRange[], drops: TimeRange[], minPiece = 0.12) 
   return out
 }
 
+function frameAt(l: Loudness, t: number) {
+  return Math.max(0, Math.min(l.db.length - 1, Math.round(t / l.hop)))
+}
+
+/** Pauses (≥ 60 ms below the gate) inside [from, to], clipped to the window. */
+function quietRuns(l: Loudness, from: number, to: number) {
+  const lo = frameAt(l, from)
+  const hi = frameAt(l, to)
+  const runs: TimeRange[] = []
+  for (let f = lo; f <= hi; f++) {
+    if (l.db[f] >= l.gate) continue
+    const s = f
+    // Ride over 1–2 frame blips (breath, click) inside a pause.
+    while (f + 1 <= hi) {
+      if (l.db[f + 1] < l.gate) f += 1
+      else if (f + 2 <= hi && l.db[f + 2] < l.gate) f += 2
+      else if (f + 3 <= hi && l.db[f + 3] < l.gate) f += 3
+      else break
+    }
+    if ((f - s + 1) * l.hop >= 0.06) runs.push({ start: s * l.hop, end: (f + 1) * l.hop })
+  }
+  return runs
+}
+
+function loudSeconds(l: Loudness, from: number, to: number) {
+  let count = 0
+  for (let f = frameAt(l, from); f <= frameAt(l, to); f++) if (l.db[f] >= l.gate) count++
+  return count * l.hop
+}
+
+/** Quietest frame in the window, mildly pulled toward `near`. */
+function quietestPoint(l: Loudness, from: number, to: number, near: number) {
+  let best = -1
+  let bestScore = Infinity
+  for (let f = frameAt(l, from); f <= frameAt(l, to); f++) {
+    const score = l.db[f] + 10 * Math.abs(f * l.hop - near)
+    if (score < bestScore) {
+      bestScore = score
+      best = f
+    }
+  }
+  return best < 0 ? null : best * l.hop
+}
+
+function expectedSpeechSeconds(words: TimedWord[]) {
+  return words.reduce(
+    (sum, word) => sum + word.word.replace(/[^A-Za-z0-9]/g, '').length * 0.075 + 0.05,
+    0,
+  )
+}
+
+/**
+ * Whisper times repeated words badly — it squeezes the flub into a sliver
+ * ("because," 2.76–2.86) and gives the rest to the redo, which is really
+ * 2.66–3.50 + 3.64–4.0. Cutting on those times slices words in half. Move the
+ * cut onto the pauses that actually surround the dropped words.
+ */
+function snapDropToPauses(
+  words: TimedWord[],
+  first: number,
+  last: number,
+  l: Loudness,
+): TimeRange | null {
+  const prevKept = words[first - 1]
+  const nextKept = words[last + 1]
+  const flubStart = words[first].start
+  const flubEnd = words[last].end
+
+  // Start: never take more than 40% of the kept word before the flub.
+  const startLo = Math.max(
+    flubStart - 0.4,
+    prevKept ? prevKept.start + 0.6 * (prevKept.end - prevKept.start) : 0,
+  )
+  const startHi = Math.min(flubStart + 0.35, words[first].end + 0.05)
+  if (startHi <= startLo) return null
+  const startRuns = quietRuns(l, startLo, startHi)
+  let start: number | null
+  if (startRuns.length) {
+    const run = startRuns.reduce((a, b) =>
+      Math.abs((a.start + a.end) / 2 - flubStart) <= Math.abs((b.start + b.end) / 2 - flubStart) ? a : b,
+    )
+    start = Math.min(run.start + 0.08, (run.start + run.end) / 2)
+  } else {
+    start = quietestPoint(l, startLo, startHi, flubStart)
+  }
+  if (start === null) return null
+
+  // End: the pause before the redo. Whisper's redo word can be stretched far
+  // past the real pause, so look up to its end.
+  const endLo = Math.max(start + 0.1, words[last].start)
+  const endHi = nextKept ? Math.min(flubEnd + 0.8, nextKept.end + 0.1) : flubEnd + 0.4
+  let end: number | null = null
+  if (endHi > endLo) {
+    const endRuns = quietRuns(l, endLo, endHi)
+    if (endRuns.length) {
+      const run = endRuns.reduce((a, b) =>
+        Math.abs((a.start + a.end) / 2 - flubEnd) <= Math.abs((b.start + b.end) / 2 - flubEnd) ? a : b,
+      )
+      end = Math.max(run.end - 0.08, (run.start + run.end) / 2)
+    }
+  }
+  // A pause past the redo would take the kept word with it — only accept
+  // spans whose speech fits the dropped words.
+  const maxLoud = expectedSpeechSeconds(words.slice(first, last + 1)) * 1.6 + 0.2
+  if (end === null || loudSeconds(l, start, end) > maxLoud) {
+    end = quietestPoint(l, flubEnd - 0.12, flubEnd + 0.12, flubEnd)
+  }
+  if (end === null || end - start < 0.08) return null
+  return { start, end }
+}
+
 /**
  * Word-level mistakes the take-matching passes miss:
  * - stutters ("I I think", "the the", "soft soft")
@@ -666,7 +778,11 @@ function subtractRanges(cuts: TimeRange[], drops: TimeRange[], minPiece = 0.12) 
  * - spoken correction cues ("sorry", "let me start again") + the flub before them
  * Always keeps the later attempt.
  */
-export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
+export function dropFlubs(
+  cuts: TimeRange[],
+  allWords: TimedWord[],
+  loudness?: Loudness | null,
+) {
   const counts = { stutters: 0, restarts: 0, falseStarts: 0, cues: 0 }
   const inCuts = allWords
     .filter((word) => cuts.some((cut) => word.end > cut.start && word.start < cut.end))
@@ -771,6 +887,11 @@ export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
           // "this thing has, this has" — first "this" repeats after 2 words.
           // Allow when the span is short.
           if (intervening >= 1 && words[j].start - words[i].end > 2.2) continue
+          // A redo carries on with words from the abandoned try ("has"). Plain
+          // speech doesn't: "I think, if I went" must stay.
+          if (intervening >= 1 && !tokens.slice(i + 1, j).includes(tokens[j + 1])) {
+            continue
+          }
         } else if (intervening > 4) {
           continue
         }
@@ -854,7 +975,7 @@ export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
     // Whisper often packs a stutter flush against the redo
     // ("because," end === next "because" start). Ending at next.start-0.04
     // only shaved ~0.05–0.1s and left both words audible.
-    const start = Math.max(0, words[i].start - 0.06)
+    let start = Math.max(0, words[i].start - 0.06)
     let end: number
     if (j + 1 < words.length) {
       const nextStart = words[j + 1].start
@@ -867,6 +988,12 @@ export function dropFlubs(cuts: TimeRange[], allWords: TimedWord[]) {
     } else {
       end = words[j].end + 0.08
     }
+    if (loudness) {
+      const snapped = snapDropToPauses(words, i, j, loudness)
+      if (snapped) ({ start, end } = snapped)
+    }
+    const prev = ranges[ranges.length - 1]
+    if (prev) start = Math.max(start, prev.end)
     if (end > start + 0.04) ranges.push({ start, end })
     i = j
   }
@@ -922,7 +1049,13 @@ export async function removeRetakes(input: {
   }
 
   // 0) Word-level flubs: stutters, restarts, false starts, "sorry / let me redo"
-  const flubs = dropFlubs(input.cuts, words)
+  let loudness: Loudness | null = null
+  try {
+    loudness = await measureLoudness(input.inputPath)
+  } catch {
+    /* fall back to Whisper word times */
+  }
+  const flubs = dropFlubs(input.cuts, words, loudness)
   const flubParts = [
     flubs.counts.restarts && `${flubs.counts.restarts} restart${flubs.counts.restarts === 1 ? '' : 's'}`,
     flubs.counts.falseStarts && `${flubs.counts.falseStarts} false start${flubs.counts.falseStarts === 1 ? '' : 's'}`,

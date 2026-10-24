@@ -83,6 +83,36 @@ function readPcm(inputPath: string): Promise<Int16Array> {
   })
 }
 
+/** 10 ms loudness curve of the source, for snapping cuts onto real pauses. */
+export type Loudness = {
+  db: Float32Array
+  /** Seconds per frame. */
+  hop: number
+  /** Below this a frame counts as a pause between words. */
+  gate: number
+}
+
+export async function measureLoudness(inputPath: string): Promise<Loudness | null> {
+  const pcm = await readPcm(inputPath)
+  const hopSamples = SILERO_SAMPLE_RATE / 100
+  const win = hopSamples * 2
+  const frames = Math.floor((pcm.length - win) / hopSamples) + 1
+  if (frames < 20) return null
+  const db = new Float32Array(frames)
+  for (let f = 0; f < frames; f++) {
+    // Frame f is centred on f * hop (window spans ±10 ms).
+    const offset = Math.max(0, f * hopSamples - hopSamples)
+    let energy = 0
+    for (let i = 0; i < win && offset + i < pcm.length; i++) energy += pcm[offset + i] ** 2
+    db[f] = 10 * Math.log10(energy / win + 1e-9)
+  }
+  const sorted = Float64Array.from(db).sort()
+  const noiseFloor = percentile(sorted, 0.1)
+  const voiceRef = percentile(sorted, 0.97)
+  if (voiceRef - noiseFloor < 12) return null
+  return { db, hop: hopSamples / SILERO_SAMPLE_RATE, gate: Math.max(noiseFloor + 6, voiceRef - 30) }
+}
+
 function percentile(sorted: Float64Array, p: number) {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]
 }
