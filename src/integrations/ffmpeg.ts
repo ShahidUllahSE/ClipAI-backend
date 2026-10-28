@@ -560,6 +560,11 @@ export type ClipMotion =
   | 'shake'
   | 'bounce'
 
+/**
+ * Zoom-out starts slightly in and eases back to the full frame. It used to
+ * start at 1.62× — a tight close-up on every cut, not a basic zoom out.
+ */
+const ZOOM_OUT_FROM = 1.15
 
 export type SubjectFocus = { x: number; y: number }
 
@@ -703,6 +708,7 @@ function motionScaleCrop(
   shot: 'wide' | 'close',
   portrait: boolean,
   extraZoom = 1,
+  fps = 30,
 ) {
   const cover = `scale=${w}:${h}:force_original_aspect_ratio=increase:flags=fast_bilinear`
   const zMul = Number.isFinite(extraZoom) && extraZoom > 0 ? extraZoom : 1
@@ -723,6 +729,21 @@ function motionScaleCrop(
     if (Math.abs(a - b) < 0.02) return apply(a, fx, fy)
     const zExpr = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,t/${d})`
     return `${cover},scale=w='iw*(${zExpr})':h='ih*(${zExpr})':eval=frame:flags=fast_bilinear,${crop},setsar=1`
+  }
+
+  /**
+   * Basic zoom out via zoompan. The animated `scale` used by applyLive
+   * segfaults the bundled ffmpeg 6.1 on gentle zooms (e.g. 1.15 → 1), so this
+   * path never resizes per frame. 2× upscale first keeps the motion smooth.
+   */
+  const applyZoomOut = (fx: number, fy: number) => {
+    const a = Math.max(1, ZOOM_OUT_FROM * zMul)
+    const b = Math.max(1, zMul)
+    if (Math.abs(a - b) < 0.02) return apply(a, fx, fy)
+    const z = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,in/${(fps * zoomWindow).toFixed(3)})`
+    const x = `max(0\\,min(iw-iw/zoom\\,iw*${fx.toFixed(3)}-iw/zoom/2))`
+    const y = `max(0\\,min(ih-ih/zoom\\,ih*${fy.toFixed(3)}-ih/zoom/2))`
+    return `${cover},crop=${w}:${h}:${cropAround(fx, fy)},scale=${w * 2}:${h * 2}:flags=bicubic,zoompan=z='${z}':x='${x}':y='${y}':d=1:s=${w}x${h}:fps=${fps},setsar=1`
   }
 
   const applyKenBurns = (fx: number, fy: number) => {
@@ -780,7 +801,7 @@ function motionScaleCrop(
   // Portrait source: overall = the original 9:16 frame. Do not pan.
   if (portrait) {
     if (motion === 'zoom-in') return applyLive(1, 1.38, 0.5, 0.5)
-    if (motion === 'zoom-out') return applyLive(1.62, 1, 0.5, 0.5)
+    if (motion === 'zoom-out') return applyZoomOut(0.5, 0.5)
     if (motion === 'ken-burns') return applyKenBurns(0.58, 0.38)
     if (motion === 'punch') return applyPunch(0.5, 0.46)
     if (motion === 'bounce') return applyBounce(0.5, 0.46)
@@ -819,7 +840,7 @@ function motionScaleCrop(
   }
 
   if (motion === 'zoom-in') return applyLive(1, 1.38, speaker.x, 0.5)
-  if (motion === 'zoom-out') return applyLive(1.62, 1, scene.x, 0.5)
+  if (motion === 'zoom-out') return applyZoomOut(scene.x, 0.5)
   if (motion === 'ken-burns') return applyKenBurns(speaker.x, speaker.y)
   if (motion === 'punch') return applyPunch(speaker.x, speaker.y)
   if (motion === 'bounce') return applyBounce(speaker.x, speaker.y)
@@ -988,7 +1009,7 @@ async function renderSeekedBatch(input: {
     const extraZoom = input.extraZoomByCut?.[globalIndex] ?? 1
     const pts = spd === 1 ? 'setpts=PTS-STARTPTS' : `setpts=(PTS-STARTPTS)/${spd}`
     filters.push(
-      `[${i}:v]trim=start=${preroll}:duration=${trimDur},${pts},${fpsPrefix}${motionScaleCrop(globalIndex, playDur, cutMotion, input.w, input.h, focus, shot, input.portrait, extraZoom)}[v${i}]`,
+      `[${i}:v]trim=start=${preroll}:duration=${trimDur},${pts},${fpsPrefix}${motionScaleCrop(globalIndex, playDur, cutMotion, input.w, input.h, focus, shot, input.portrait, extraZoom, input.fps ?? 30)}[v${i}]`,
     )
     if (input.useAudio) {
       // Micro fades at every join: no click where the waveform is cut, and
