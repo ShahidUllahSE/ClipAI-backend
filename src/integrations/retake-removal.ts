@@ -148,10 +148,20 @@ function isNearbyPair(
   return gap >= -0.15 && gap <= maxGap
 }
 
+/** Whisper writes a line the speaker trailed off on as "someone..." — not an ending. */
+function trailsOff(text: string) {
+  return /(\.\.\.|…)["')\]]*$/.test(text.trim())
+}
+
+function endsSentence(text: string) {
+  return /[.!?]["')\]]*$/.test(text.trim()) && !trailsOff(text)
+}
+
 function thoughtLooksComplete(text: string) {
+  if (trailsOff(text)) return false
   const tokens = takeTokens(text)
   if (tokens.length >= 8) return true
-  return /[.!?]$/.test(text.trim()) || tokens.length >= 5
+  return endsSentence(text) || tokens.length >= 5
 }
 
 /**
@@ -446,6 +456,24 @@ function dropRepeatedPhrases(
 }
 
 /**
+ * Where to end the video once a later closing redo is dropped: right after
+ * the last kept line said before that redo. (Ending after the first kept line
+ * in the window cut every line between it and the redo.)
+ */
+function closingHardEnd(items: TimeRange[], keep: boolean[]) {
+  const firstDropped = keep.findIndex((ok, index) => index > 0 && !ok)
+  if (firstDropped < 0) return null
+  const keptEnds = items.filter((_, i) => keep[i]).map((item) => item.end)
+  if (!keptEnds.length) return null
+  let hardEnd = Math.max(...keptEnds) + 0.1
+  if (!keep[keep.length - 1]) {
+    const before = items.filter((_, i) => i < firstDropped && keep[i])
+    if (before.length) hardEnd = Math.min(hardEnd, before[before.length - 1].end + 0.12)
+  }
+  return hardEnd
+}
+
+/**
  * Closing CTA filmed twice. Keep the first complete closing line; drop the redo.
  */
 export async function dropClosingRetake(
@@ -486,20 +514,8 @@ export async function dropClosingRetake(
         }
       }
     }
-    const droppedLater = keep.some((ok, index) => index > 0 && !ok)
-    if (droppedLater) {
-      const firstKept = sentences.find((_, index) => keep[index])
-      const keptEnds = sentences
-        .filter((_, index) => keep[index])
-        .map((s) => s.end)
-      if (firstKept && keptEnds.length) {
-        let hardEnd = Math.max(...keptEnds) + 0.1
-        if (!keep[keep.length - 1]) {
-          hardEnd = Math.min(hardEnd, firstKept.end + 0.12)
-        }
-        return clipCutsToHardEnd(cuts, hardEnd)
-      }
-    }
+    const hardEnd = closingHardEnd(sentences, keep)
+    if (hardEnd !== null) return clipCutsToHardEnd(cuts, hardEnd)
   }
 
   // Fallback: cut-level + silence split on last long cut
@@ -508,11 +524,13 @@ export async function dropClosingRetake(
     ? closeCuts
     : cuts.slice(-Math.min(4, cuts.length))
   const texts = group.map((cut) => cutText(cut, words))
-  const keep = texts.map((text) => takeTokens(text).length >= 3)
+  // Short clips ("I'll link it") are too short to compare — but they stay.
+  const comparable = texts.map((text) => takeTokens(text).length >= 3)
+  const keep = group.map(() => true)
   for (let later = 1; later < group.length; later += 1) {
-    if (!keep[later]) continue
+    if (!comparable[later] || !keep[later]) continue
     for (let earlier = 0; earlier < later; earlier += 1) {
-      if (!keep[earlier]) continue
+      if (!comparable[earlier] || !keep[earlier]) continue
       if (similarTakes(texts[earlier], texts[later], { nearby: true })) {
         if (thoughtLooksComplete(texts[earlier])) keep[later] = false
         else keep[earlier] = false
@@ -520,15 +538,8 @@ export async function dropClosingRetake(
       }
     }
   }
-  if (keep.some((ok, index) => index > 0 && !ok)) {
-    const keptEnds = group.filter((_, i) => keep[i]).map((c) => c.end)
-    const firstKept = group.find((_, i) => keep[i])
-    if (firstKept && keptEnds.length) {
-      let hardEnd = Math.max(...keptEnds) + 0.1
-      if (!keep[keep.length - 1]) hardEnd = Math.min(hardEnd, firstKept.end + 0.12)
-      return clipCutsToHardEnd(cuts, hardEnd)
-    }
-  }
+  const hardEnd = closingHardEnd(group, keep)
+  if (hardEnd !== null) return clipCutsToHardEnd(cuts, hardEnd)
 
   const last = cuts[cuts.length - 1]
   if (!last || last.end - last.start < 4.5) return cuts
@@ -953,7 +964,7 @@ export function dropFlubs(
     if (
       next < words.length &&
       size <= 5 &&
-      !/[.!?]$/.test(words[end].word.trim()) &&
+      !endsSentence(words[end].word) &&
       words[next].start - words[end].end <= 2.5
     ) {
       let k = 0
@@ -962,6 +973,20 @@ export function dropFlubs(
       if (k >= 2 || (k >= 1 && k === size) || (k >= 1 && size <= 2)) {
         markRange(i, next)
         counts.falseStarts += 1
+      } else {
+        // Redo picks up partway through: "Because this thing has… This has
+        // reverse…" → drop "this thing has", keep "Because".
+        for (let o = i + 1; o <= end; o++) {
+          if (
+            tokens[o] === tokens[next] &&
+            next + 1 < tokens.length &&
+            tokens.slice(o + 1, end + 1).includes(tokens[next + 1])
+          ) {
+            markRange(o, next)
+            counts.falseStarts += 1
+            break
+          }
+        }
       }
     }
     i = end
