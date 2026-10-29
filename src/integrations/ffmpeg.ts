@@ -561,10 +561,10 @@ export type ClipMotion =
   | 'bounce'
 
 /**
- * Zoom-out starts slightly in and eases back to the full frame. It used to
- * start at 1.62× — a tight close-up on every cut, not a basic zoom out.
+ * Zoom out starts slightly in and moves back to the full frame over the whole
+ * video. It used to start at 1.62× — a tight close-up on every cut.
  */
-const ZOOM_OUT_FROM = 1.15
+const ZOOM_OUT_FROM = 1.2
 
 export type SubjectFocus = { x: number; y: number }
 
@@ -709,6 +709,7 @@ function motionScaleCrop(
   portrait: boolean,
   extraZoom = 1,
   fps = 30,
+  timeline?: { offset: number; total: number },
 ) {
   const cover = `scale=${w}:${h}:force_original_aspect_ratio=increase:flags=fast_bilinear`
   const zMul = Number.isFinite(extraZoom) && extraZoom > 0 ? extraZoom : 1
@@ -735,12 +736,18 @@ function motionScaleCrop(
    * Basic zoom out via zoompan. The animated `scale` used by applyLive
    * segfaults the bundled ffmpeg 6.1 on gentle zooms (e.g. 1.15 → 1), so this
    * path never resizes per frame. 2× upscale first keeps the motion smooth.
+   *
+   * One continuous move over the whole edit: each cut picks up the zoom where
+   * the previous cut left it. Restarting per cut read as a bounce on every cut.
    */
   const applyZoomOut = (fx: number, fy: number) => {
     const a = Math.max(1, ZOOM_OUT_FROM * zMul)
     const b = Math.max(1, zMul)
     if (Math.abs(a - b) < 0.02) return apply(a, fx, fy)
-    const z = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*min(1\\,in/${(fps * zoomWindow).toFixed(3)})`
+    const offset = timeline?.offset ?? 0
+    const total = Math.max(0.2, timeline?.total ?? duration)
+    const progress = `min(1\\,(${offset.toFixed(3)}+in/${fps})/${total.toFixed(3)})`
+    const z = `${a.toFixed(4)}+(${(b - a).toFixed(4)})*${progress}`
     const x = `max(0\\,min(iw-iw/zoom\\,iw*${fx.toFixed(3)}-iw/zoom/2))`
     const y = `max(0\\,min(ih-ih/zoom\\,ih*${fy.toFixed(3)}-ih/zoom/2))`
     return `${cover},crop=${w}:${h}:${cropAround(fx, fy)},scale=${w * 2}:${h * 2}:flags=bicubic,zoompan=z='${z}':x='${x}':y='${y}':d=1:s=${w}x${h}:fps=${fps},setsar=1`
@@ -974,6 +981,9 @@ async function renderSeekedBatch(input: {
   focuses: SubjectFocus[]
   shots: Array<'wide' | 'close'>
   portrait: boolean
+  /** Start of each cut (global index) in the finished video, seconds. */
+  timelineOffsets: number[]
+  timelineTotal: number
   onProgress?: (ratio: number) => void
 }) {
   const args = ['-y', '-hide_banner', '-nostats']
@@ -1008,8 +1018,12 @@ async function renderSeekedBatch(input: {
     const cutMotion = input.perCutMotions?.[globalIndex] ?? input.motion
     const extraZoom = input.extraZoomByCut?.[globalIndex] ?? 1
     const pts = spd === 1 ? 'setpts=PTS-STARTPTS' : `setpts=(PTS-STARTPTS)/${spd}`
+    const timeline = {
+      offset: input.timelineOffsets[globalIndex] ?? 0,
+      total: input.timelineTotal,
+    }
     filters.push(
-      `[${i}:v]trim=start=${preroll}:duration=${trimDur},${pts},${fpsPrefix}${motionScaleCrop(globalIndex, playDur, cutMotion, input.w, input.h, focus, shot, input.portrait, extraZoom, input.fps ?? 30)}[v${i}]`,
+      `[${i}:v]trim=start=${preroll}:duration=${trimDur},${pts},${fpsPrefix}${motionScaleCrop(globalIndex, playDur, cutMotion, input.w, input.h, focus, shot, input.portrait, extraZoom, input.fps ?? 30, timeline)}[v${i}]`,
     )
     if (input.useAudio) {
       // Micro fades at every join: no click where the waveform is cut, and
@@ -1114,6 +1128,13 @@ export async function renderJumpCutVideo(input: {
   }
 
   const keepSeconds = cuts.reduce((sum, c) => sum + (c.end - c.start) / c.speed, 0)
+  // Where each cut starts in the finished video — zoom out runs as one move
+  // across the whole edit instead of restarting on every cut.
+  const timelineOffsets: number[] = []
+  cuts.reduce((elapsed, c) => {
+    timelineOffsets.push(elapsed)
+    return elapsed + (c.end - c.start) / c.speed
+  }, 0)
   const { w, h } = targetFrame(input.aspectRatio)
   const sourceFps = await probeFrameRate(input.inputPath)
   const fps = exportFps(sourceFps)
@@ -1147,6 +1168,8 @@ export async function renderJumpCutVideo(input: {
     focuses,
     shots,
     portrait,
+    timelineOffsets,
+    timelineTotal: keepSeconds,
   }
 
   if (cuts.length <= batchSize) {
