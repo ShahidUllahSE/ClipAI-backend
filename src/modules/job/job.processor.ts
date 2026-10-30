@@ -279,8 +279,10 @@ function clipMotionFromTimeline(
   const pick = (timelineJson as { timeline?: { transitionPick?: unknown } } | null)
     ?.timeline?.transitionPick
   if (typeof pick === 'number' && pick > 0 && !fromTimeline) return 'none'
-  // Only use keyframing when no explicit zoom chip was chosen.
-  if (options?.keyframing && (zoom === 'none' || zoom == null || zoom === '')) {
+  // "None" is a choice — no motion. Keyframing (on by default) used to turn
+  // it into zoom-in. Keyframing only fills in when no zoom was sent at all.
+  if (zoom === 'none') return 'none'
+  if (options?.keyframing && (zoom == null || zoom === '')) {
     if (options.keyframePreset === 'slow-zoom-out') return 'zoom-out'
     return 'zoom-in'
   }

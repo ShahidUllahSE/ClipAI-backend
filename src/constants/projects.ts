@@ -59,8 +59,9 @@ export const ZOOM_EFFECTS = [
   'random',
 ] as const
 export type ZoomEffectId = (typeof ZOOM_EFFECTS)[number]
-/** Effects the client can include in the Randomize mix. */
+/** Effects the client can include in the Randomize mix ('none' = a still cut). */
 export const RANDOM_POOL_EFFECTS = [
+  'none',
   'punch',
   'zoom-in',
   'zoom-out',
