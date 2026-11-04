@@ -438,12 +438,105 @@ export function trimNonSpeechFromCuts(
     }
   }
 
-  out.sort((a, b) => a.start - b.start)
+  return mergeTouching(out)
+}
+
+function mergeTouching(cuts: Array<{ start: number; end: number }>) {
   const merged: Array<{ start: number; end: number }> = []
-  for (const cut of out) {
+  for (const cut of [...cuts].sort((a, b) => a.start - b.start)) {
     const prev = merged[merged.length - 1]
     if (prev && cut.start <= prev.end + 0.02) prev.end = Math.max(prev.end, cut.end)
     else merged.push({ ...cut })
   }
   return merged
+}
+
+/** Voice pad kept around speech at a cut edge. */
+const VOICE_PRE = 0.06
+const VOICE_POST = 0.1
+
+/**
+ * Whisper often ends a word early or starts one late, so a cut edge can land
+ * on running voice and clip the word. Move such an edge out to where that
+ * voice stops. Voice running past `maxExtend` is left alone (it is the next
+ * phrase, not this word's tail), as is anything reaching a dropped filler.
+ */
+export function extendCutsOverVoice(
+  cuts: Array<{ start: number; end: number }>,
+  map: SpeechMap,
+  durationSeconds: number,
+  opts: { avoid: TimedWord[]; maxExtend?: number },
+): Array<{ start: number; end: number }> {
+  const maxFrames = Math.round((opts.maxExtend ?? 0.4) / FRAME_SECONDS)
+  const clear = (start: number, end: number) =>
+    !opts.avoid.some((word) => word.end > start && word.start < end)
+  const out = cuts.map((cut) => {
+    let { start, end } = cut
+    const first = timeToFrame(cut.start)
+    if (map.speech[first]) {
+      let f = first
+      while (f > 0 && first - f < maxFrames && map.speech[f - 1]) f--
+      const voiceStart = frameTime(f) - FRAME_SECONDS / 2
+      if ((f === 0 || !map.speech[f - 1]) && clear(voiceStart, cut.start)) {
+        start = Math.max(0, voiceStart - VOICE_PRE)
+      }
+    }
+    const last = timeToFrame(cut.end)
+    if (map.speech[last]) {
+      let f = last
+      while (f + 1 < map.speech.length && f - last < maxFrames && map.speech[f + 1]) f++
+      const voiceEnd = frameTime(f) + FRAME_SECONDS / 2
+      if ((f + 1 >= map.speech.length || !map.speech[f + 1]) && clear(cut.end, voiceEnd)) {
+        end = Math.min(durationSeconds, voiceEnd + VOICE_POST)
+      }
+    }
+    return { start, end }
+  })
+  return mergeTouching(out)
+}
+
+/**
+ * Final jump-cut tightening on the voice map. Whisper stretches words over
+ * the pauses beside them, so cuts built from word timings keep dead air and
+ * breaths/noise inside them. Every non-voice stretch of `minGap`+ inside or at
+ * the edge of a cut is removed. The pad around the voice only grows over real
+ * sound (soft onsets and tails), so it never brings silence back. A cut with
+ * no detected voice is left as it is.
+ */
+export function cutDeadAirFromCuts(
+  cuts: Array<{ start: number; end: number }>,
+  map: SpeechMap,
+  opts: { minGap: number },
+): Array<{ start: number; end: number }> {
+  const MIN_PAD = 0.02
+  const padOverSound = (from: number, direction: -1 | 1, maxPad: number) => {
+    let pad = MIN_PAD
+    while (
+      pad < maxPad &&
+      map.sound[timeToFrame(from + direction * (pad + FRAME_SECONDS))]
+    ) {
+      pad += FRAME_SECONDS
+    }
+    return pad
+  }
+  const out: Array<{ start: number; end: number }> = []
+  for (const cut of cuts) {
+    const runs = speechRuns(map, cut.start, cut.end)
+    if (!runs.length) {
+      out.push({ ...cut })
+      continue
+    }
+    const groups: Array<{ start: number; end: number }> = []
+    for (const run of runs) {
+      const last = groups[groups.length - 1]
+      if (last && run.start - last.end < opts.minGap) last.end = run.end
+      else groups.push({ ...run })
+    }
+    for (const group of groups) {
+      const start = Math.max(cut.start, group.start - padOverSound(group.start, -1, VOICE_PRE))
+      const end = Math.min(cut.end, group.end + padOverSound(group.end, 1, VOICE_POST))
+      if (end - start >= 0.08) out.push({ start, end })
+    }
+  }
+  return mergeTouching(out)
 }

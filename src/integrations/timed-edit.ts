@@ -77,20 +77,29 @@ export function remapWordsToOutput(
 ): TimedWord[] {
   const out: TimedWord[] = []
   let cursor = 0
+  // A word stretched over a removed pause overlaps the cuts on both sides —
+  // extend its first caption entry instead of showing the word twice.
+  let lastIndex = -1
 
   for (const cut of cuts) {
     const speed = cut.speed > 0 ? cut.speed : 1
     const cutDur = Math.max(0, cut.end - cut.start)
-    for (const w of words) {
-      if (w.end <= cut.start || w.start >= cut.end) continue
+    words.forEach((w, index) => {
+      if (w.end <= cut.start || w.start >= cut.end) return
       const srcStart = Math.max(w.start, cut.start)
       const srcEnd = Math.min(w.end, cut.end)
+      const end = cursor + (srcEnd - cut.start) / speed
+      if (index === lastIndex) {
+        out[out.length - 1].end = end
+        return
+      }
       out.push({
         word: w.word,
         start: cursor + (srcStart - cut.start) / speed,
-        end: cursor + (srcEnd - cut.start) / speed,
+        end,
       })
-    }
+      lastIndex = index
+    })
     cursor += cutDur / speed
   }
 

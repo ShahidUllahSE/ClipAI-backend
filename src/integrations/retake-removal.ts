@@ -68,13 +68,40 @@ function sequenceOverlap(a: string[], b: string[], minLen = 3) {
   return Math.max(best, headHit / Math.max(1, head))
 }
 
+/** Words any two lines can open with — "And then…" / "And you can…" is no retake. */
+const CONNECTOR_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'but', 'can', 'for', 'has', 'have', 'if', 'it',
+  'its', 's', 'so', 'that', 'the', 'their', 'them', 'then', 'there', 'they',
+  'this', 'to', 'was', 'we', 'what', 'when', 'with', 'you', 'your',
+])
+
+function contentWords(tokens: string[]) {
+  return tokens.filter((word) => !CONNECTOR_WORDS.has(word)).length
+}
+
 /** Same opener (creators restart from the first few words). */
 function samePrefix(a: string[], b: string[], n = 4) {
   if (a.length < n || b.length < n) return false
   for (let i = 0; i < n; i++) {
     if (a[i] !== b[i]) return false
   }
-  return true
+  return contentWords(a.slice(0, n)) >= Math.min(2, n)
+}
+
+/**
+ * Should `earlier` be dropped as a flubbed take of `later`? A take far longer
+ * than its "redo" holds lines the redo doesn't, so dropping it loses speech.
+ */
+function isEarlierTakeOf(
+  earlier: string,
+  later: string,
+  opts?: { nearby?: boolean },
+) {
+  const earlierLen = takeTokensLoose(earlier).length
+  if (earlierLen >= 12 && earlierLen > takeTokensLoose(later).length * 2.5) {
+    return false
+  }
+  return similarTakes(earlier, later, opts)
 }
 
 export function similarTakes(
@@ -98,6 +125,7 @@ export function similarTakes(
     if (
       la[0] === lb[0] &&
       la[1] === lb[1] &&
+      contentWords(la.slice(0, 2)) >= 1 &&
       Math.min(la.length, lb.length) <= 5
     ) {
       return true
@@ -267,7 +295,7 @@ export function dropRepeatedTakes(
       const nearby = isNearbyPair(sorted[earlier].end, sorted[later].start)
       if (!nearby && takeTokens(laterText).length < 3) continue
       if (
-        similarTakes(cutText(sorted[earlier], words), laterText, { nearby })
+        isEarlierTakeOf(cutText(sorted[earlier], words), laterText, { nearby })
       ) {
         keep[earlier] = false
       }
@@ -342,7 +370,7 @@ export function trimDoubledTakeCuts(
         // Prefer adjacent / nearby pairs (same retake burst)
         if (!isNearbyPair(parts[earlier].end, parts[later].start, 14)) continue
         if (
-          similarTakes(cutText(parts[earlier], words), laterText, {
+          isEarlierTakeOf(cutText(parts[earlier], words), laterText, {
             nearby: true,
           })
         ) {
@@ -412,7 +440,7 @@ function dropRepeatedPhrases(
         sentences[later].start,
       )
       if (
-        similarTakes(sentences[earlier].text, sentences[later].text, {
+        isEarlierTakeOf(sentences[earlier].text, sentences[later].text, {
           nearby,
         })
       ) {

@@ -45,10 +45,13 @@ import {
 import { burnTimedCaptions } from './export-polish.service'
 import { GROQ_CHUNK_SECONDS, transcribeSourceAudio } from './groq-transcribe'
 import {
+  cutDeadAirFromCuts,
   detectSpeechActivity,
+  extendCutsOverVoice,
   isFillerWord,
   tightenWordsToSpeech,
   trimNonSpeechFromCuts,
+  type SpeechMap,
 } from './speech-activity'
 
 export interface TalkingHeadResult {
@@ -89,6 +92,18 @@ function pauseMin(level: SilenceSensitivity) {
       return 0.7
     default:
       return 0.85
+  }
+}
+
+/** Shortest non-voice stretch (pause, breath, noise) cut out of a keep-segment. */
+function deadAirMin(level: SilenceSensitivity) {
+  switch (level) {
+    case 'light':
+      return 0.3
+    case 'aggressive':
+      return 0.1
+    default:
+      return 0.15
   }
 }
 
@@ -350,6 +365,7 @@ export async function processTalkingHead(input: {
   // Strip non-speech sounds (breaths, lip smacks, umms, coughs, room noise).
   // silencedetect never removes these because they are not quiet.
   let speechWords = words
+  let voiceMap: SpeechMap | null = null
   if (words.length && baseCuts.length) {
     try {
       report(75, 'Removing non-speech sounds')
@@ -376,6 +392,12 @@ export async function processTalkingHead(input: {
             `Removed ~${Math.max(0, before - keepSeconds).toFixed(1)}s of non-speech sound (breaths, fillers, noise) via ${map.engine} — ${baseCuts.length} keep-segments`,
           )
         }
+        voiceMap = map
+        baseCuts = extendCutsOverVoice(baseCuts, map, duration, {
+          avoid: tight.words.filter((word) => isFillerWord(word.word)),
+        })
+        keepSeconds = totalKeepSeconds(baseCuts)
+        removedSeconds = Math.max(0, duration - keepSeconds)
       } else {
         notes.push('Non-speech pass skipped: voice not separable from background')
       }
@@ -418,6 +440,26 @@ export async function processTalkingHead(input: {
         `Retake pass skipped: ${
           error instanceof Error ? error.message.slice(0, 120) : 'unknown'
         }`,
+      )
+    }
+  }
+
+  // Last: cut the dead air and non-speech sound still inside each segment.
+  // Whisper's word timings run straight through short pauses, so the passes
+  // above leave them in. Runs after retakes so it never changes which words
+  // are kept — it only removes stretches with no voice.
+  if (voiceMap && baseCuts.length) {
+    const before = totalKeepSeconds(baseCuts)
+    const tightened = cutDeadAirFromCuts(baseCuts, voiceMap, {
+      minGap: deadAirMin(input.silenceSensitivity),
+    })
+    const saved = before - totalKeepSeconds(tightened)
+    if (tightened.length && saved > 0.05) {
+      baseCuts = tightened
+      keepSeconds = totalKeepSeconds(baseCuts)
+      removedSeconds = Math.max(0, duration - keepSeconds)
+      notes.push(
+        `Tightened cuts: removed ~${saved.toFixed(1)}s of dead air / non-speech between words (${baseCuts.length} keep-segments)`,
       )
     }
   }
