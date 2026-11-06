@@ -1,3 +1,5 @@
+import fs from 'fs'
+import path from 'path'
 import { env } from '../config'
 import { extractJsonObject, geminiGenerateText } from './gemini'
 import type { SilenceSensitivity } from './ffmpeg'
@@ -18,7 +20,14 @@ import {
   assignSegmentSpeeds,
   totalOutputDuration,
   type SpeedCut,
+  type TimedWord,
 } from './timed-edit'
+import {
+  detectSpeechActivity,
+  flagRuns,
+  type SpeechMap,
+} from './speech-activity'
+import { transcribeSourceAudio } from './groq-transcribe'
 
 export interface AsmrResult {
   provider: 'ffmpeg' | 'ffmpeg+gemini'
@@ -136,77 +145,175 @@ function keepClipsWithMinSound(
   return cuts
 }
 
-async function geminiProductHint(input: {
-  filename: string
-  durationSeconds: number
-}): Promise<{ summary: string; category: string; titleHint?: string }> {
-  if (!env.GEMINI_API_KEY) {
-    return {
-      summary: 'ASMR/unboxing edit keeping product sound moments.',
-      category: 'product-unboxing',
-    }
+type Span = { start: number; end: number }
+
+/** Speech runs closer than this count as one spoken phrase. */
+const DIALOG_MERGE_GAP = 0.35
+/** Air kept around each phrase so word onsets and tails are not clipped. */
+const DIALOG_PRE = 0.06
+const DIALOG_POST = 0.15
+const DIALOG_MIN_SECONDS = 0.25
+/** Less speech than this means the clip has no real dialog. */
+const DIALOG_MIN_TOTAL = 1
+/** ASMR sound bits: non-dialog moments, each between MIN and MAX seconds. */
+const SOUND_BIT_MIN = 0.4
+const SOUND_BIT_MAX = 2
+/** Sound bits stay under this share of the finished edit. */
+const SOUND_BIT_MAX_SHARE = 0.3
+
+function mergeSpans(spans: Span[]): Span[] {
+  const merged: Span[] = []
+  for (const span of [...spans].sort((a, b) => a.start - b.start)) {
+    const last = merged[merged.length - 1]
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end)
+    else merged.push({ ...span })
   }
-
-  const prompt = [
-    'You help edit ASMR / product unboxing social videos.',
-    'Return JSON only: { "summary": string, "category": string, "titleHint": string }',
-    `Filename: ${input.filename}`,
-    `DurationSeconds: ${input.durationSeconds}`,
-    'Assume soft packaging/hand sounds and product reveals. Keep title short and social.',
-  ].join('\n')
-
-  const text = await geminiGenerateText(prompt)
-  const parsed = extractJsonObject<{
-    summary?: string
-    category?: string
-    titleHint?: string
-  }>(text)
-
-  return {
-    summary: parsed.summary || 'ASMR/unboxing highlight edit',
-    category: parsed.category || 'product-unboxing',
-    titleHint: parsed.titleHint,
-  }
+  return merged
 }
 
 /**
- * ASMR / unboxing pipeline:
- * 1) Drop quiet waits via silence detect
- * 2) If almost nothing was cut (noisy WhatsApp audio), keep loudest sound peaks
- * 3) Optional Gemini title/summary only
+ * Voice runs become phrases. When a transcript exists, a phrase with no
+ * spoken word is not dialog (beeps, clicks and handling noise often read as
+ * voice to the pitch check), so it is dropped.
  */
-export async function processAsmrUnboxing(input: {
-  inputPath: string
-  outputPath: string
-  outputUrl: string
-  originalFilename: string
-  silenceSensitivity: SilenceSensitivity
-  pacing: Pacing
-  keepAudio: boolean
-  speedRamp?: 'off' | 'light' | 'medium' | 'aggressive'
-  durationSeconds?: number
-  timelineJson?: unknown
-  /** Effects mixed by Randomize */
-  randomPool?: readonly ClipMotion[]
-  motion?: ClipMotion
-  onProgress?: (percent: number, note?: string) => void
-}): Promise<AsmrResult> {
-  const notes: string[] = [
-    'ASMR/unboxing: keep product sounds & reveals, trim empty waiting',
-  ]
+function dialogSpans(voice: Span[], words: TimedWord[], duration: number): Span[] {
+  const phrases: Span[] = []
+  for (const run of voice) {
+    const last = phrases[phrases.length - 1]
+    if (last && run.start - last.end < DIALOG_MERGE_GAP) last.end = run.end
+    else phrases.push({ ...run })
+  }
+  const spoken = words.length
+    ? phrases.filter((phrase) =>
+        words.some((w) => w.end > phrase.start - 0.1 && w.start < phrase.end + 0.1),
+      )
+    : phrases
+  return mergeSpans(
+    spoken
+      .map((phrase) => ({
+        start: Math.max(0, phrase.start - DIALOG_PRE),
+        end: Math.min(duration, phrase.end + DIALOG_POST),
+      }))
+      .filter((phrase) => phrase.end - phrase.start >= DIALOG_MIN_SECONDS),
+  )
+}
 
-  const hasAudio = await probeHasAudio(input.inputPath)
-  if (!hasAudio) {
-    throw new Error(
-      'This video has no audio. ASMR/unboxing needs packaging or product sounds.',
-    )
+/** Sound that is not speech: packaging, taps, rustles, product clicks. */
+function soundBitCandidates(map: SpeechMap, duration: number): Span[] {
+  const flags = new Uint8Array(map.sound.length)
+  for (let f = 0; f < flags.length; f++) {
+    flags[f] = map.sound[f] && !map.speech[f] ? 1 : 0
+  }
+  return flagRuns(flags, duration)
+    .filter((run) => run.end - run.start >= SOUND_BIT_MIN)
+    .map((run) => ({
+      start: run.start,
+      end: Math.min(run.end, run.start + SOUND_BIT_MAX),
+    }))
+}
+
+/**
+ * Each candidate gets a coin flip, until the share budget is used up. When
+ * the flips skip everything, the first candidate that fits is still taken, so
+ * the toggle never silently does nothing.
+ */
+function pickSoundBits(candidates: Span[], dialogSeconds: number): Span[] {
+  const shuffled = [...candidates]
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const swap = shuffled[i]
+    shuffled[i] = shuffled[j]
+    shuffled[j] = swap
+  }
+  const budget =
+    (dialogSeconds * SOUND_BIT_MAX_SHARE) / (1 - SOUND_BIT_MAX_SHARE)
+  const picked: Span[] = []
+  let used = 0
+  const fits = (span: Span) => used + span.end - span.start <= budget
+  for (const candidate of shuffled) {
+    if (Math.random() < 0.5 || !fits(candidate)) continue
+    picked.push(candidate)
+    used += candidate.end - candidate.start
+  }
+  if (!picked.length) {
+    const first = shuffled.find(fits)
+    if (first) picked.push(first)
+  }
+  return picked
+}
+
+/**
+ * Dialog-first cut plan. Returns null when the clip has too little speech to
+ * build a dialog edit, so the caller can fall back to sound moments.
+ */
+async function planDialogCuts(input: {
+  inputPath: string
+  tempDir: string
+  duration: number
+  soundBits: boolean
+}): Promise<{ cuts: Span[] | null; notes: string[] }> {
+  const notes: string[] = []
+  const map = await detectSpeechActivity(input.inputPath)
+
+  let words: TimedWord[] = []
+  if (env.GROQ_API_KEY) {
+    try {
+      const stt = await transcribeSourceAudio(
+        input.inputPath,
+        input.duration,
+        input.tempDir,
+      )
+      words = stt.words
+    } catch (error) {
+      notes.push(
+        `Transcript skipped: ${
+          error instanceof Error ? error.message.slice(0, 120) : 'unknown'
+        }`,
+      )
+    }
   }
 
-  const duration =
-    input.durationSeconds && input.durationSeconds > 0
-      ? input.durationSeconds
-      : await probeDuration(input.inputPath)
+  const voice = map
+    ? flagRuns(map.speech, input.duration)
+    : words.map((w) => ({ start: w.start, end: w.end }))
+  let cuts = dialogSpans(voice, words, input.duration)
+  const dialogSeconds = totalKeep(cuts)
+  if (dialogSeconds < DIALOG_MIN_TOTAL) {
+    notes.push('No dialog found — keeping sound moments instead')
+    return { cuts: null, notes }
+  }
 
+  const engine = map ? map.engine : 'transcript'
+  const checked = map && words.length ? ' + transcript check' : ''
+  notes.push(
+    `Dialog only: ${cuts.length} speech segments (${dialogSeconds.toFixed(1)}s) via ${engine}${checked}`,
+  )
+
+  if (input.soundBits && map) {
+    const candidates = soundBitCandidates(map, input.duration)
+    const bits = pickSoundBits(candidates, dialogSeconds)
+    cuts = mergeSpans([...cuts, ...bits])
+    notes.push(
+      `ASMR sound bits on: added ${bits.length} of ${candidates.length} non-dialog moments (${totalKeep(bits).toFixed(1)}s)`,
+    )
+  }
+  return { cuts, notes }
+}
+
+/** Loudness-based fallback for clips with no detectable dialog. */
+async function soundPeakCuts(
+  input: {
+    inputPath: string
+    silenceSensitivity: SilenceSensitivity
+    pacing: Pacing
+  },
+  duration: number,
+  notes: string[],
+): Promise<{
+  cuts: Span[]
+  method: string
+  silenceRanges: Span[]
+}> {
   const level = asmrSilenceLevel(input.silenceSensitivity)
   const silenceRanges = await detectSilenceRanges(input.inputPath, level)
   notes.push(`Quiet waits detected: ${silenceRanges.length} (level ${level})`)
@@ -274,11 +381,112 @@ export async function processAsmrUnboxing(input: {
     silenceRanges,
     MIN_SOUND_SECONDS,
   )
-  keep = totalKeep(baseCuts)
+  return { cuts: baseCuts, method, silenceRanges }
+}
 
-  notes.push(
-    `Keeping ${baseCuts.length} segments via ${method} (${input.pacing} pacing)`,
-  )
+async function geminiProductHint(input: {
+  filename: string
+  durationSeconds: number
+}): Promise<{ summary: string; category: string; titleHint?: string }> {
+  if (!env.GEMINI_API_KEY) {
+    return {
+      summary: 'ASMR/unboxing edit keeping product sound moments.',
+      category: 'product-unboxing',
+    }
+  }
+
+  const prompt = [
+    'You help edit ASMR / product unboxing social videos.',
+    'Return JSON only: { "summary": string, "category": string, "titleHint": string }',
+    `Filename: ${input.filename}`,
+    `DurationSeconds: ${input.durationSeconds}`,
+    'Assume soft packaging/hand sounds and product reveals. Keep title short and social.',
+  ].join('\n')
+
+  const text = await geminiGenerateText(prompt)
+  const parsed = extractJsonObject<{
+    summary?: string
+    category?: string
+    titleHint?: string
+  }>(text)
+
+  return {
+    summary: parsed.summary || 'ASMR/unboxing highlight edit',
+    category: parsed.category || 'product-unboxing',
+    titleHint: parsed.titleHint,
+  }
+}
+
+function ensureTempDir(outputPath: string) {
+  const tempDir = path.join(path.dirname(outputPath), '.tmp')
+  fs.mkdirSync(tempDir, { recursive: true })
+  return tempDir
+}
+
+/**
+ * ASMR / unboxing pipeline:
+ * 1) Dialog only: keep speech phrases (voice detect + transcript check)
+ * 2) Optional ASMR sound bits: randomly add non-dialog sound moments
+ * 3) No dialog at all: fall back to loudness-based sound moments
+ * 4) Optional Gemini title/summary only
+ */
+export async function processAsmrUnboxing(input: {
+  inputPath: string
+  outputPath: string
+  outputUrl: string
+  originalFilename: string
+  silenceSensitivity: SilenceSensitivity
+  pacing: Pacing
+  keepAudio: boolean
+  speedRamp?: 'off' | 'light' | 'medium' | 'aggressive'
+  durationSeconds?: number
+  timelineJson?: unknown
+  /** Effects mixed by Randomize */
+  randomPool?: readonly ClipMotion[]
+  motion?: ClipMotion
+  /** Randomly add non-dialog ASMR sound bits between the dialog */
+  soundBits?: boolean
+  onProgress?: (percent: number, note?: string) => void
+}): Promise<AsmrResult> {
+  const notes: string[] = [
+    'ASMR/unboxing: dialog only, trim empty waiting',
+  ]
+
+  const hasAudio = await probeHasAudio(input.inputPath)
+  if (!hasAudio) {
+    throw new Error(
+      'This video has no audio. ASMR/unboxing needs packaging or product sounds.',
+    )
+  }
+
+  const duration =
+    input.durationSeconds && input.durationSeconds > 0
+      ? input.durationSeconds
+      : await probeDuration(input.inputPath)
+
+  const plan = await planDialogCuts({
+    inputPath: input.inputPath,
+    tempDir: ensureTempDir(input.outputPath),
+    duration,
+    soundBits: input.soundBits ?? false,
+  })
+  notes.push(...plan.notes)
+
+  let baseCuts: Span[]
+  let method: string
+  let silenceRanges: Span[] = []
+  if (plan.cuts) {
+    baseCuts = plan.cuts
+    method = 'dialog-cuts'
+  } else {
+    const fallback = await soundPeakCuts(input, duration, notes)
+    baseCuts = fallback.cuts
+    method = fallback.method
+    silenceRanges = fallback.silenceRanges
+  }
+  const keep = totalKeep(baseCuts)
+
+  notes.push(`Keeping ${baseCuts.length} segments via ${method}`)
 
   let summary = 'ASMR/unboxing edit keeping product sound moments.'
   let category = 'product-unboxing'

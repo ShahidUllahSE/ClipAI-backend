@@ -272,6 +272,21 @@ function speechRuns(map: SpeechMap, from: number, to: number) {
   return runs
 }
 
+/** Whole-clip time ranges where `flags` is set (one entry per frame). */
+export function flagRuns(flags: Uint8Array, durationSeconds: number) {
+  const runs: Array<{ start: number; end: number }> = []
+  for (let f = 0; f < flags.length; f++) {
+    if (!flags[f]) continue
+    const start = f
+    while (f + 1 < flags.length && flags[f + 1]) f++
+    runs.push({
+      start: Math.max(0, frameTime(start) - FRAME_SECONDS / 2),
+      end: Math.min(durationSeconds, frameTime(f) + FRAME_SECONDS / 2),
+    })
+  }
+  return runs
+}
+
 function soundSeconds(map: SpeechMap, from: number, to: number) {
   const lo = Math.max(0, timeToFrame(from))
   const hi = Math.min(map.sound.length - 1, timeToFrame(to))
