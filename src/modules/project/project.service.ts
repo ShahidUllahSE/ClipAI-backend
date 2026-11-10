@@ -41,7 +41,6 @@ function withOptionDefaults(raw: ProjectOptionsDto): ProjectOptionsDto {
     keepAudio: raw.keepAudio ?? true,
     audioNormalize: raw.audioNormalize ?? true,
     removeMistakes: raw.removeMistakes ?? false,
-    asmrSoundBits: raw.asmrSoundBits ?? false,
     cropPreset: raw.cropPreset ?? 'center',
     colorGrade: raw.colorGrade ?? 'clean',
     fadeInOut: raw.fadeInOut ?? true,

@@ -34,8 +34,6 @@ export interface ProjectOptionsDto {
   audioNormalize: boolean
   /** Drop flubs / repeated takes (opt-in) */
   removeMistakes?: boolean
-  /** ASMR: randomly add non-dialog sound bits between the dialog */
-  asmrSoundBits?: boolean
   /** ClipAI local tools (no API keys) */
   cropPreset: 'none' | 'center' | 'top' | 'bottom' | 'tight'
   colorGrade: 'none' | 'clean' | 'warm' | 'cool' | 'vivid'
