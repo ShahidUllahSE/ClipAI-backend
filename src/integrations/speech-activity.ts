@@ -428,32 +428,27 @@ export function trimNonSpeechFromCuts(
       .sort((a, b) => a.start - b.start)
     if (!inside.length) continue
 
-    const pieces: Array<{ first: TimedWord; reach: number }> = []
+    const pieces: Array<{ first: TimedWord; last: TimedWord }> = []
     let first = inside[0]
-    // Whisper word spans can overlap ("me?" ends after "Testing," starts), so
-    // track the furthest end reached, not just the previous word's end.
-    let reach = inside[0].end
     for (let i = 1; i < inside.length; i++) {
+      const a = inside[i - 1]
       const b = inside[i]
-      const gap = b.start - reach
+      const gap = b.start - a.end
       // Measure only outside the word margins, so a word's own tail never
       // counts as "noise between words".
       const noisy =
         gap >= minNoiseGap &&
-        soundSeconds(map, reach + POST, b.start - PRE) >= 0.1
+        soundSeconds(map, a.end + POST, b.start - PRE) >= 0.1
       if (noisy || gap >= opts.pauseSeconds) {
-        pieces.push({ first, reach })
+        pieces.push({ first, last: a })
         first = b
-        reach = b.end
-      } else {
-        reach = Math.max(reach, b.end)
       }
     }
-    pieces.push({ first, reach })
+    pieces.push({ first, last: inside[inside.length - 1] })
 
     for (const piece of pieces) {
       const start = Math.max(0, piece.first.start - PRE)
-      const end = Math.min(durationSeconds, piece.reach + POST)
+      const end = Math.min(durationSeconds, piece.last.end + POST)
       if (end - start >= 0.12) out.push({ start, end })
     }
   }
