@@ -110,6 +110,13 @@ const projectSchema = new Schema(
     progressPercent: { type: Number, default: 0 },
     progressNote: { type: String, default: '' },
     analysis: { type: Schema.Types.Mixed, default: null },
+    /** Mistake stretches the client put back on the last re-render */
+    restoreMistakes: { type: Schema.Types.Mixed, default: [] },
+    /** Client's own add-back / cut-out stretches (seconds) */
+    manualEdits: {
+      type: Schema.Types.Mixed,
+      default: () => ({ add: [], remove: [] }),
+    },
     editPlan: { type: Schema.Types.Mixed, default: null },
     creditCharged: { type: Boolean, default: false },
   },

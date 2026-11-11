@@ -15,7 +15,7 @@ import {
   type ClipMotion,
   type SilenceSensitivity,
 } from './ffmpeg'
-import { removeRetakes } from './retake-removal'
+import { removeRetakes, type RemovedMistake } from './retake-removal'
 import {
   buildRandomCutMotions,
   extraZoomByCutFromTimeline,
@@ -41,6 +41,8 @@ import {
   writeAssFile,
   type CaptionCue,
   type SpeedCut,
+  applyManualEdits,
+  type ManualEdits,
 } from './timed-edit'
 import { burnTimedCaptions } from './export-polish.service'
 import { GROQ_CHUNK_SECONDS, transcribeSourceAudio } from './groq-transcribe'
@@ -69,6 +71,8 @@ export interface TalkingHeadResult {
   outputUrl: string
   notes: string[]
   removedSeconds: number
+  /** Stretches Remove mistakes cut out, so the client can put them back. */
+  removedMistakes: RemovedMistake[]
   /** Final frame size after landscape talking-head is kept 16:9. */
   aspectRatio: '9:16' | '1:1' | '16:9'
 }
@@ -210,6 +214,10 @@ export async function processTalkingHead(input: {
   aspectRatio?: '9:16' | '1:1' | '16:9'
   /** Opt-in flub / retake removal */
   removeMistakes?: boolean
+  /** Mistake stretches from an earlier run that the client put back */
+  restoreMistakes?: Array<{ start: number; end: number }>
+  /** Client's own add-back and cut-out stretches, applied last */
+  manualEdits?: ManualEdits
   onProgress?: (percent: number, note?: string) => void
 }): Promise<TalkingHeadResult> {
   const notes: string[] = ['Talking-head: remove pauses / dead air between speech']
@@ -412,6 +420,7 @@ export async function processTalkingHead(input: {
 
   // Opt-in only — remove-mistakes can cut heavily when left always-on.
   const retakeWords = words.length >= 4 ? words : speechWords
+  let removedMistakes: RemovedMistake[] = []
   if (!input.removeMistakes) {
     notes.push('Remove mistakes: off (skipped retake pass)')
   } else if (retakeWords.length && baseCuts.length >= 1) {
@@ -427,7 +436,9 @@ export async function processTalkingHead(input: {
           words: retakeWords,
           durationSeconds: duration,
           inputPath: input.inputPath,
+          restore: input.restoreMistakes,
         })
+        removedMistakes = retake.removed
         if (retake.cuts.length) {
           baseCuts = retake.cuts
           keepSeconds = totalKeepSeconds(baseCuts)
@@ -463,6 +474,11 @@ export async function processTalkingHead(input: {
       )
     }
   }
+
+  // Client's own fixes go last so nothing after them can undo them.
+  baseCuts = applyManualEdits(baseCuts, input.manualEdits, duration)
+  keepSeconds = totalKeepSeconds(baseCuts)
+  removedSeconds = Math.max(0, duration - keepSeconds)
 
   const speedLevel = input.speedRamp ?? 'off'
   const cuts = speechWords.length
@@ -636,6 +652,7 @@ export async function processTalkingHead(input: {
     outputUrl: input.outputUrl,
     notes,
     removedSeconds: Math.max(0, duration - keepSeconds),
+    removedMistakes,
     aspectRatio,
   }
 }

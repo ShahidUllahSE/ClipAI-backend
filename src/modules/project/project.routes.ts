@@ -5,6 +5,7 @@ import { projectController } from './project.controller'
 import {
   bulkDownloadSchema,
   createProjectSchema,
+  rerenderProjectSchema,
   updateProjectSchema,
 } from './project.validation'
 
@@ -24,6 +25,11 @@ router.patch('/:id', validate(updateProjectSchema), projectController.update)
 router.delete('/:id', projectController.remove)
 router.post('/:id/process', projectController.process)
 router.post('/:id/retry', projectController.retry)
+router.post(
+  '/:id/rerender',
+  validate(rerenderProjectSchema),
+  projectController.rerender,
+)
 router.get('/:id/job', projectController.job)
 router.get('/:id/download', projectController.download)
 

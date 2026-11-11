@@ -1062,7 +1062,7 @@ export function dropFlubs(
 /**
  * Full retake cleanup pass used by talking-head and rapid-cut.
  */
-export async function removeRetakes(input: {
+async function removeRetakesCore(input: {
   cuts: Array<{ start: number; end: number }>
   words: TimedWord[]
   durationSeconds: number
@@ -1172,4 +1172,71 @@ export async function removeRetakes(input: {
   }
 
   return { cuts, dropped, notes }
+}
+
+/** A stretch of the source that Remove mistakes cut out. */
+export type RemovedMistake = { start: number; end: number; text: string }
+
+/** Keep-cuts minus `minus`, dropping slivers too short to matter. */
+function subtractSpans(
+  from: Array<{ start: number; end: number }>,
+  minus: Array<{ start: number; end: number }>,
+) {
+  const out: Array<{ start: number; end: number }> = []
+  for (const span of from) {
+    let pieces = [span]
+    for (const cut of minus) {
+      pieces = pieces.flatMap((piece) => {
+        if (cut.end <= piece.start || cut.start >= piece.end) return [piece]
+        const parts: Array<{ start: number; end: number }> = []
+        if (cut.start > piece.start) parts.push({ start: piece.start, end: cut.start })
+        if (cut.end < piece.end) parts.push({ start: cut.end, end: piece.end })
+        return parts
+      })
+    }
+    out.push(...pieces.filter((piece) => piece.end - piece.start >= 0.2))
+  }
+  return out
+}
+
+/**
+ * Remove mistakes, plus a record of each stretch it removed so the client can
+ * put any of them back. `restore` lists stretches from an earlier run's
+ * `removed`; those are added back into the cuts.
+ */
+export async function removeRetakes(input: {
+  cuts: Array<{ start: number; end: number }>
+  words: TimedWord[]
+  durationSeconds: number
+  inputPath: string
+  restore?: Array<{ start: number; end: number }>
+}): Promise<{
+  cuts: Array<{ start: number; end: number }>
+  dropped: number
+  notes: string[]
+  removed: RemovedMistake[]
+}> {
+  const core = await removeRetakesCore(input)
+  const firstRemoved = subtractSpans(input.cuts, core.cuts)
+  const restoring = (input.restore ?? []).filter((r) =>
+    firstRemoved.some(
+      (cut) => Math.abs(cut.start - r.start) < 0.05 && Math.abs(cut.end - r.end) < 0.05,
+    ),
+  )
+  let cuts = core.cuts
+  if (restoring.length) {
+    cuts = mergeTouchingCuts(
+      [...core.cuts, ...restoring].sort((a, b) => a.start - b.start),
+    )
+    core.notes.push(`Put back ${restoring.length} removed mistake${restoring.length === 1 ? '' : 's'}`)
+  }
+  const removed = subtractSpans(input.cuts, cuts).map((span) => ({
+    start: span.start,
+    end: span.end,
+    text: input.words
+      .filter((w) => w.end > span.start && w.start < span.end)
+      .map((w) => w.word)
+      .join(' '),
+  }))
+  return { cuts, dropped: core.dropped, notes: core.notes, removed }
 }

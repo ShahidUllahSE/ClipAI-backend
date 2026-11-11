@@ -566,6 +566,8 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         randomPool: options.randomPool,
         aspectRatio: options.aspectRatio,
         removeMistakes: Boolean(options.removeMistakes),
+        restoreMistakes: project.restoreMistakes ?? [],
+        manualEdits: project.manualEdits ?? undefined,
         onProgress: writeProgress,
       })
 
@@ -712,6 +714,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         speech: job.speechResult,
         notes: allNotes,
         removedSeconds: result.removedSeconds,
+        removedMistakes: result.removedMistakes,
         outputDurationSeconds: polish.durationSeconds,
       }
       project.editPlan = {
@@ -1006,6 +1009,8 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         randomPool: options.randomPool,
         aspectRatio: options.aspectRatio,
         removeMistakes: Boolean(options.removeMistakes),
+        restoreMistakes: project.restoreMistakes ?? [],
+        manualEdits: project.manualEdits ?? undefined,
         onProgress: writeProgress,
       })
 
@@ -1104,6 +1109,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         understanding: job.understandingResult,
         notes: allNotes,
         removedSeconds: result.removedSeconds,
+        removedMistakes: result.removedMistakes,
         outputDurationSeconds: polish.durationSeconds,
       }
       project.editPlan = {

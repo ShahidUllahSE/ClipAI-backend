@@ -739,3 +739,47 @@ export function totalOutputDuration(cuts: SpeedCut[]) {
     0,
   )
 }
+
+export type ManualEdits = {
+  /** Source stretches to put back into the edit (seconds) */
+  add: Array<{ start: number; end: number }>
+  /** Source stretches to cut out of the edit (seconds) */
+  remove: Array<{ start: number; end: number }>
+}
+
+/**
+ * Client's own fixes, applied last: "add" puts stretches back in, then
+ * "remove" cuts stretches out (so remove wins where they overlap).
+ */
+export function applyManualEdits(
+  cuts: Array<{ start: number; end: number }>,
+  edits: ManualEdits | undefined,
+  durationSeconds: number,
+): Array<{ start: number; end: number }> {
+  if (!edits || (!edits.add.length && !edits.remove.length)) return cuts
+  const clamp = (s: { start: number; end: number }) => ({
+    start: Math.max(0, s.start),
+    end: Math.min(durationSeconds, s.end),
+  })
+  let out = [...cuts, ...edits.add.map(clamp)]
+    .filter((s) => s.end - s.start > 0)
+    .sort((a, b) => a.start - b.start)
+  const merged: Array<{ start: number; end: number }> = []
+  for (const span of out) {
+    const last = merged[merged.length - 1]
+    if (last && span.start <= last.end + 0.02) last.end = Math.max(last.end, span.end)
+    else merged.push({ ...span })
+  }
+  out = merged
+  for (const cut of edits.remove.map(clamp)) {
+    out = out.flatMap((piece) => {
+      if (cut.end <= piece.start || cut.start >= piece.end) return [piece]
+      const parts: Array<{ start: number; end: number }> = []
+      if (cut.start > piece.start) parts.push({ start: piece.start, end: cut.start })
+      if (cut.end < piece.end) parts.push({ start: cut.end, end: piece.end })
+      return parts
+    })
+  }
+  const kept = out.filter((s) => s.end - s.start >= 0.12)
+  return kept.length ? kept : cuts
+}

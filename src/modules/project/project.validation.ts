@@ -70,6 +70,26 @@ export const createProjectSchema = z
     }
   })
 
+/** Mistake stretches the client wants put back on the next render. */
+const secondsRange = z
+  .object({
+    start: z.number().min(0),
+    end: z.number().min(0),
+  })
+  .refine((r) => r.end - r.start >= 0.2, {
+    message: 'Each range must be at least 0.2 seconds.',
+  })
+
+export const rerenderProjectSchema = z.object({
+  restoreMistakes: z.array(secondsRange).max(200).optional(),
+  manualEdits: z
+    .object({
+      add: z.array(secondsRange).max(100),
+      remove: z.array(secondsRange).max(100),
+    })
+    .optional(),
+})
+
 export const bulkDownloadSchema = z.object({
   ids: z.array(z.string().min(1)).min(1).max(100),
 })

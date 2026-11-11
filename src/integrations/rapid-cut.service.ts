@@ -19,7 +19,7 @@ import {
   tightenWordsToSpeech,
   trimNonSpeechFromCuts,
 } from './speech-activity'
-import { removeRetakes } from './retake-removal'
+import { removeRetakes, type RemovedMistake } from './retake-removal'
 import {
   buildRandomCutMotions,
   extraZoomByCutFromTimeline,
@@ -41,6 +41,8 @@ import {
   type CaptionCue,
   type SpeedCut,
   type TimedWord,
+  applyManualEdits,
+  type ManualEdits,
 } from './timed-edit'
 
 export interface RapidCutResult {
@@ -48,6 +50,8 @@ export interface RapidCutResult {
   durationSeconds: number
   outputDurationSeconds: number
   removedSeconds: number
+  /** Stretches Remove mistakes cut out, so the client can put them back. */
+  removedMistakes: RemovedMistake[]
   silenceRanges: Array<{ start: number; end: number }>
   cuts: SpeedCut[]
   segmentSpeedApplied: boolean
@@ -721,6 +725,10 @@ export async function processRapidCut(input: {
   aspectRatio?: '9:16' | '1:1' | '16:9'
   /** Opt-in flub / retake removal */
   removeMistakes?: boolean
+  /** Mistake stretches from an earlier run that the client put back */
+  restoreMistakes?: Array<{ start: number; end: number }>
+  /** Client's own add-back and cut-out stretches, applied last */
+  manualEdits?: ManualEdits
   onProgress?: (percent: number, note?: string) => void
 }): Promise<RapidCutResult> {
   const notes: string[] = [
@@ -771,6 +779,7 @@ export async function processRapidCut(input: {
   // Speech-heavy clips: complete sentences from the transcript, drop leftover
   // talk and caption-less holds. Music-only clips stay on the energy path.
   let usedTranscript = false
+  let removedMistakes: RemovedMistake[] = []
   let transcriptWords: TimedWord[] = []
   let rawTranscriptWords: TimedWord[] = []
   if (env.GROQ_API_KEY) {
@@ -847,7 +856,9 @@ export async function processRapidCut(input: {
                 words: stt.words.length >= 4 ? stt.words : compact,
                 durationSeconds: duration,
                 inputPath: input.inputPath,
+                restore: input.restoreMistakes,
               })
+              removedMistakes = retakePass.removed
               spokenCuts = retakePass.cuts
               if (spokenCuts.length < 1) spokenCuts = leftoverClean
               if (retakePass.notes.length) notes.push(...retakePass.notes)
@@ -910,7 +921,9 @@ export async function processRapidCut(input: {
               : transcriptWords,
           durationSeconds: duration,
           inputPath: input.inputPath,
+          restore: input.restoreMistakes,
         })
+        removedMistakes = retakePass.removed
         baseCuts = retakePass.cuts
         if (retakePass.notes.length) notes.push(...retakePass.notes)
       }
@@ -1035,6 +1048,9 @@ export async function processRapidCut(input: {
     )
   }
 
+  // Client's own fixes go last so nothing after them can undo them.
+  baseCuts = applyManualEdits(baseCuts, input.manualEdits, duration)
+
   const durations = baseCuts.map((c) => c.end - c.start)
   const maxDur = Math.max(...durations, 0.01)
   const importance = durations.map((d) => 1 - d / maxDur)
@@ -1106,6 +1122,7 @@ export async function processRapidCut(input: {
     durationSeconds: duration,
     outputDurationSeconds,
     removedSeconds,
+    removedMistakes,
     silenceRanges,
     cuts,
     segmentSpeedApplied: sped,

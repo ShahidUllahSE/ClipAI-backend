@@ -57,6 +57,42 @@ export const projectController = {
     )
   }),
 
+  rerender: asyncHandler(async (req, res) => {
+    const userId = requireUserId(req)
+    const projectId = String(req.params.id)
+    const project = await projectService.getDocument(projectId, userId)
+    const analysis = project.analysis as {
+      removedMistakes?: Array<{ start: number; end: number }>
+    } | null
+    const removed = analysis?.removedMistakes ?? []
+    const body = req.body as {
+      restoreMistakes?: Array<{ start: number; end: number }>
+      manualEdits?: { add: Array<{ start: number; end: number }>; remove: Array<{ start: number; end: number }> }
+    }
+    // Only accept stretches the last render actually removed.
+    const restore = (body.restoreMistakes ?? []).filter((r) =>
+      removed.some(
+        (m) => Math.abs(m.start - r.start) < 0.05 && Math.abs(m.end - r.end) < 0.05,
+      ),
+    )
+    project.restoreMistakes = body.restoreMistakes ? restore : project.restoreMistakes
+    if (body.manualEdits) {
+      // Manual ranges are in source seconds; keep only what's inside the clip.
+      const limit = project.durationSeconds || Number.MAX_SAFE_INTEGER
+      const inside = (r: { start: number; end: number }) => ({
+        start: Math.max(0, r.start),
+        end: Math.min(limit, r.end),
+      })
+      project.manualEdits = {
+        add: body.manualEdits.add.map(inside).filter((r) => r.end - r.start >= 0.2),
+        remove: body.manualEdits.remove.map(inside).filter((r) => r.end - r.start >= 0.2),
+      }
+    }
+    project.markModified('manualEdits')
+    await project.save()
+    sendSuccess(res, await jobService.start(projectId, userId))
+  }),
+
   retry: asyncHandler(async (req, res) => {
     sendSuccess(
       res,
