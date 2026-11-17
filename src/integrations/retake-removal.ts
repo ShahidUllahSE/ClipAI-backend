@@ -748,11 +748,15 @@ function expectedSpeechSeconds(words: TimedWord[]) {
   )
 }
 
+function isStretchedToken(word: TimedWord) {
+  return word.end - word.start > 1.15 || /\.\.\.|…/.test(word.word)
+}
+
 /**
- * Whisper times repeated words badly — it squeezes the flub into a sliver
- * ("because," 2.76–2.86) and gives the rest to the redo, which is really
- * 2.66–3.50 + 3.64–4.0. Cutting on those times slices words in half. Move the
- * cut onto the pauses that actually surround the dropped words.
+ * Whisper times repeated words badly — either squeezes the flub into a sliver
+ * or stretches "Because..." across a long pause. Mid-span pause hunting on
+ * stretched tokens was leaving the spoken flub and only cutting silence.
+ * Always hard-cap the drop at the redo's start.
  */
 function snapDropToPauses(
   words: TimedWord[],
@@ -764,47 +768,84 @@ function snapDropToPauses(
   const nextKept = words[last + 1]
   const flubStart = words[first].start
   const flubEnd = words[last].end
+  const hardEnd = nextKept ? nextKept.start : flubEnd + 0.08
+  const stretched = words
+    .slice(first, last + 1)
+    .some((word) => isStretchedToken(word))
+
+  // Stretched / ellipsis flubs: cut the whole Whisper span up to the redo.
+  // Do not search for quiet in the middle — that skips the spoken word.
+  if (stretched) {
+    const start = prevKept
+      ? Math.max(prevKept.end, flubStart - 0.08)
+      : Math.max(0, flubStart - 0.06)
+    if (hardEnd - start < 0.08) return null
+    return { start, end: hardEnd }
+  }
 
   // Start: never take more than 40% of the kept word before the flub.
   const startLo = Math.max(
     flubStart - 0.4,
     prevKept ? prevKept.start + 0.6 * (prevKept.end - prevKept.start) : 0,
   )
-  const startHi = Math.min(flubStart + 0.35, words[first].end + 0.05)
+  const startHi = Math.min(flubStart + 0.2, words[first].end + 0.05, hardEnd)
   if (startHi <= startLo) return null
   const startRuns = quietRuns(l, startLo, startHi)
   let start: number | null
   if (startRuns.length) {
     const run = startRuns.reduce((a, b) =>
-      Math.abs((a.start + a.end) / 2 - flubStart) <= Math.abs((b.start + b.end) / 2 - flubStart) ? a : b,
+      Math.abs((a.start + a.end) / 2 - flubStart) <=
+      Math.abs((b.start + b.end) / 2 - flubStart)
+        ? a
+        : b,
     )
     start = Math.min(run.start + 0.08, (run.start + run.end) / 2)
   } else {
     start = quietestPoint(l, startLo, startHi, flubStart)
   }
   if (start === null) return null
+  // Never start after the flub has already been spoken.
+  start = Math.min(start, flubStart + 0.12)
+  if (prevKept) start = Math.max(start, prevKept.end)
 
-  // End: the pause before the redo. Whisper's redo word can be stretched far
-  // past the real pause, so look up to its end.
+  // End: only search up to the redo start — never into the kept take.
   const endLo = Math.max(start + 0.1, words[last].start)
-  const endHi = nextKept ? Math.min(flubEnd + 0.8, nextKept.end + 0.1) : flubEnd + 0.4
+  const endHi = hardEnd
   let end: number | null = null
   if (endHi > endLo) {
     const endRuns = quietRuns(l, endLo, endHi)
     if (endRuns.length) {
       const run = endRuns.reduce((a, b) =>
-        Math.abs((a.start + a.end) / 2 - flubEnd) <= Math.abs((b.start + b.end) / 2 - flubEnd) ? a : b,
+        Math.abs((a.start + a.end) / 2 - flubEnd) <=
+        Math.abs((b.start + b.end) / 2 - flubEnd)
+          ? a
+          : b,
       )
       end = Math.max(run.end - 0.08, (run.start + run.end) / 2)
     }
   }
-  // A pause past the redo would take the kept word with it — only accept
-  // spans whose speech fits the dropped words.
-  const maxLoud = expectedSpeechSeconds(words.slice(first, last + 1)) * 1.6 + 0.2
+  const maxLoud =
+    expectedSpeechSeconds(words.slice(first, last + 1)) * 1.8 + 0.25
   if (end === null || loudSeconds(l, start, end) > maxLoud) {
-    end = quietestPoint(l, flubEnd - 0.12, flubEnd + 0.12, flubEnd)
+    end = hardEnd
   }
-  if (end === null || end - start < 0.08) return null
+  end = Math.min(end, hardEnd)
+
+  // If the snap missed the loud onset of the flub, pull start back.
+  const onsetHi = Math.min(flubStart + 0.55, hardEnd)
+  const earlyLoud = loudSeconds(l, flubStart, onsetHi)
+  const capturedEarly = loudSeconds(
+    l,
+    Math.max(start, flubStart),
+    Math.min(end, onsetHi),
+  )
+  if (earlyLoud > 0.06 && capturedEarly < earlyLoud * 0.45) {
+    start = prevKept
+      ? Math.max(prevKept.end, flubStart - 0.06)
+      : Math.max(0, flubStart - 0.06)
+  }
+
+  if (end - start < 0.08) return null
   return { start, end }
 }
 
@@ -878,16 +919,17 @@ export function dropFlubs(
     }
   }
 
-  // 2a) Adjacent doubles — "because because", "knowing knowing", "soft soft".
-  // Whisper often keeps punctuation on the first token ("because,"); flubToken
-  // already strips that so these compare equal.
+  // 2a) Adjacent / near doubles — "because because", "Knowing... Knowing".
+  // Whisper often keeps punctuation/ellipsis on the first token and stretches
+  // it across the pause (4.6s→8.1s), so allow a wider start gap when stretched.
   for (let i = 0; i < tokens.length - 1; i++) {
     if (drop[i] || drop[i + 1]) continue
     if (tokens[i] !== tokens[i + 1]) continue
     if (KEEP_DOUBLE_WORDS.has(tokens[i])) continue
     if (!(STUTTER_WORDS.has(tokens[i]) || tokens[i].length >= 2)) continue
-    // Only treat as a stutter when the two starts are close (same burst).
-    if (words[i + 1].start - words[i].start > 1.8) continue
+    const gap = words[i + 1].start - words[i].start
+    const maxGap = isStretchedToken(words[i]) ? 6 : 1.8
+    if (gap > maxGap) continue
     markRange(i, i + 1)
     counts.stutters += 1
   }
@@ -989,11 +1031,17 @@ export function dropFlubs(
     while (end + 1 < words.length && words[end + 1].start - words[end].end < 0.35) end += 1
     const next = end + 1
     const size = end - i + 1
+    const trailingGap =
+      next < words.length ? words[next].start - words[end].end : 0
+    // Stretched last token already ate the pause inside its timing.
+    const gapOk =
+      trailingGap <= 2.5 ||
+      (isStretchedToken(words[end]) && words[next]?.start - words[end].start <= 6)
     if (
       next < words.length &&
-      size <= 5 &&
-      !endsSentence(words[end].word) &&
-      words[next].start - words[end].end <= 2.5
+      size <= 8 &&
+      (!endsSentence(words[end].word) || isStretchedToken(words[end])) &&
+      gapOk
     ) {
       let k = 0
       while (k < size && next + k < tokens.length && tokens[i + k] === tokens[next + k]) k += 1
@@ -1018,6 +1066,80 @@ export function dropFlubs(
       }
     }
     i = end
+  }
+
+  // 3b) Successive same/similar phrases — client rule:
+  // "Anytime the same or similar phrase is said in succession, remove the
+  // bad take and only include the good one." Compare utterance openers.
+  {
+    const LEAD_SKIP = new Set([
+      ...RESTART_JOINERS,
+      'so',
+      'well',
+      'now',
+      'look',
+    ])
+    const uttEnds: number[] = []
+    for (let i = 0; i < words.length; i++) {
+      const gap =
+        i + 1 < words.length ? words[i + 1].start - words[i].end : 99
+      // Stretched Whisper tokens often absorb the pause ("If…" 64→73) while
+      // the next word starts flush — do NOT end the utterance on stretch
+      // alone or we split "If you know someone" into "If" + "you know…".
+      // Ellipsis / trails-off ("someone...") IS a real take boundary.
+      const stretchedBoundary =
+        isStretchedToken(words[i]) && gap >= 0.2
+      if (
+        endsSentence(words[i].word) ||
+        trailsOff(words[i].word) ||
+        stretchedBoundary ||
+        gap >= 0.45 ||
+        i === words.length - 1
+      ) {
+        uttEnds.push(i)
+      }
+    }
+    let uttStart = 0
+    for (let u = 0; u < uttEnds.length - 1; u++) {
+      const a0 = uttStart
+      const a1 = uttEnds[u]
+      const b0 = a1 + 1
+      const b1 = uttEnds[u + 1]
+      uttStart = b0
+      if (drop[a0] || b0 >= words.length) continue
+      const aLen = a1 - a0 + 1
+      const bLen = b1 - b0 + 1
+      if (aLen < 1 || bLen < 1) continue
+      if (words[b0].start - words[a0].start > 12) continue
+
+      // Skip a leading "so/and/but" on either side ("So if you know…" / "If you know…").
+      let aa = a0
+      let bb = b0
+      if (LEAD_SKIP.has(tokens[aa]) && aa < a1) aa += 1
+      if (LEAD_SKIP.has(tokens[bb]) && bb < b1) bb += 1
+
+      let k = 0
+      while (
+        aa + k <= a1 &&
+        bb + k <= b1 &&
+        tokens[aa + k] === tokens[bb + k]
+      ) {
+        k += 1
+      }
+      const aRemain = a1 - aa + 1
+      // Same opener (3+ words), or short incomplete take fully redone (1–2).
+      const shortIncomplete =
+        aRemain <= 4 &&
+        k >= Math.min(2, aRemain) &&
+        (!endsSentence(words[a1].word) || isStretchedToken(words[a1]))
+      const longPrefix = k >= 3
+      const singleStretched =
+        aLen === 1 && k >= 1 && isStretchedToken(words[a0])
+      if (!longPrefix && !shortIncomplete && !singleStretched) continue
+      // Later take should continue or finish — keep later, drop earlier.
+      markRange(a0, b0)
+      counts.restarts += 1
+    }
   }
 
   const ranges: TimeRange[] = []
