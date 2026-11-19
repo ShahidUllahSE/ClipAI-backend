@@ -93,6 +93,11 @@ function normalizeOptions(raw: ProjectOptionsDto): ProjectOptionsDto {
     keepAudio: raw.keepAudio ?? true,
     audioNormalize: raw.audioNormalize ?? true,
     removeMistakes: raw.removeMistakes ?? false,
+    removeMistakesStrength:
+      raw.removeMistakesStrength === 'light' ||
+      raw.removeMistakesStrength === 'strong'
+        ? raw.removeMistakesStrength
+        : 'balanced',
     cropPreset: raw.cropPreset ?? 'center',
     colorGrade: raw.colorGrade ?? 'clean',
     fadeInOut: raw.fadeInOut ?? true,
@@ -566,6 +571,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         randomPool: options.randomPool,
         aspectRatio: options.aspectRatio,
         removeMistakes: Boolean(options.removeMistakes),
+        removeMistakesStrength: options.removeMistakesStrength,
         restoreMistakes: project.restoreMistakes ?? [],
         manualEdits: project.manualEdits ?? undefined,
         onProgress: writeProgress,
@@ -715,6 +721,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         notes: allNotes,
         removedSeconds: result.removedSeconds,
         removedMistakes: result.removedMistakes,
+        suggestedMistakes: result.suggestedMistakes,
         outputDurationSeconds: polish.durationSeconds,
       }
       project.editPlan = {
@@ -1009,6 +1016,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         randomPool: options.randomPool,
         aspectRatio: options.aspectRatio,
         removeMistakes: Boolean(options.removeMistakes),
+        removeMistakesStrength: options.removeMistakesStrength,
         restoreMistakes: project.restoreMistakes ?? [],
         manualEdits: project.manualEdits ?? undefined,
         onProgress: writeProgress,
@@ -1110,6 +1118,7 @@ export async function runJobPipeline(jobId: string, projectId: string) {
         notes: allNotes,
         removedSeconds: result.removedSeconds,
         removedMistakes: result.removedMistakes,
+        suggestedMistakes: result.suggestedMistakes,
         outputDurationSeconds: polish.durationSeconds,
       }
       project.editPlan = {

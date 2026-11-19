@@ -1,5 +1,6 @@
 import type {
   EditingModeId,
+  MistakeStrength,
   ProjectStatus,
   RandomPoolEffect,
 } from '../../constants/projects'
@@ -34,6 +35,8 @@ export interface ProjectOptionsDto {
   audioNormalize: boolean
   /** Drop flubs / repeated takes (opt-in) */
   removeMistakes?: boolean
+  /** light = safe doubles; balanced = high-confidence; strong = aggressive */
+  removeMistakesStrength?: MistakeStrength
   /** ClipAI local tools (no API keys) */
   cropPreset: 'none' | 'center' | 'top' | 'bottom' | 'tight'
   colorGrade: 'none' | 'clean' | 'warm' | 'cool' | 'vivid'

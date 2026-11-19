@@ -32,6 +32,8 @@ export const ASPECT_RATIOS = ['9:16', '1:1', '16:9'] as const
 export const SILENCE_LEVELS = ['light', 'medium', 'aggressive'] as const
 export const PACING_LEVELS = ['normal', 'fast', 'very-fast'] as const
 export const SPEED_RAMPS = ['off', 'light', 'medium', 'aggressive'] as const
+export const MISTAKE_STRENGTHS = ['light', 'balanced', 'strong'] as const
+export type MistakeStrength = (typeof MISTAKE_STRENGTHS)[number]
 export const CAPTION_POSITIONS = ['bottom', 'top'] as const
 export const CAPTION_FONT_FAMILIES = [
   'arial',

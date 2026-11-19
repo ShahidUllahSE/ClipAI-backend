@@ -73,6 +73,8 @@ export interface TalkingHeadResult {
   removedSeconds: number
   /** Stretches Remove mistakes cut out, so the client can put them back. */
   removedMistakes: RemovedMistake[]
+  /** Low-confidence candidates left for Edit cuts (not auto-cut). */
+  suggestedMistakes: RemovedMistake[]
   /** Final frame size after landscape talking-head is kept 16:9. */
   aspectRatio: '9:16' | '1:1' | '16:9'
 }
@@ -214,6 +216,8 @@ export async function processTalkingHead(input: {
   aspectRatio?: '9:16' | '1:1' | '16:9'
   /** Opt-in flub / retake removal */
   removeMistakes?: boolean
+  /** How hard Remove mistakes cleans — light / balanced / strong */
+  removeMistakesStrength?: 'light' | 'balanced' | 'strong'
   /** Mistake stretches from an earlier run that the client put back */
   restoreMistakes?: Array<{ start: number; end: number }>
   /** Client's own add-back and cut-out stretches, applied last */
@@ -421,6 +425,7 @@ export async function processTalkingHead(input: {
   // Opt-in only — remove-mistakes can cut heavily when left always-on.
   const retakeWords = words.length >= 4 ? words : speechWords
   let removedMistakes: RemovedMistake[] = []
+  let suggestedMistakes: RemovedMistake[] = []
   if (!input.removeMistakes) {
     notes.push('Remove mistakes: off (skipped retake pass)')
   } else if (retakeWords.length && baseCuts.length >= 1) {
@@ -437,8 +442,10 @@ export async function processTalkingHead(input: {
           durationSeconds: duration,
           inputPath: input.inputPath,
           restore: input.restoreMistakes,
+          strength: input.removeMistakesStrength,
         })
         removedMistakes = retake.removed
+        suggestedMistakes = retake.suggested
         if (retake.cuts.length) {
           baseCuts = retake.cuts
           keepSeconds = totalKeepSeconds(baseCuts)
@@ -653,6 +660,7 @@ export async function processTalkingHead(input: {
     notes,
     removedSeconds: Math.max(0, duration - keepSeconds),
     removedMistakes,
+    suggestedMistakes,
     aspectRatio,
   }
 }

@@ -857,11 +857,16 @@ function snapDropToPauses(
  * - short false starts before a pause that the next phrase restarts
  * - spoken correction cues ("sorry", "let me start again") + the flub before them
  * Always keeps the later attempt.
+ *
+ * `strength` controls what is auto-cut vs only suggested:
+ * light = clear doubles / exact restarts; balanced = high-confidence only;
+ * strong = also low-confidence successive phrases.
  */
 export function dropFlubs(
   cuts: TimeRange[],
   allWords: TimedWord[],
   loudness?: Loudness | null,
+  strength: MistakeStrength = 'balanced',
 ) {
   const counts = { stutters: 0, restarts: 0, falseStarts: 0, cues: 0 }
   const inCuts = allWords
@@ -869,11 +874,28 @@ export function dropFlubs(
     .sort((a, b) => a.start - b.start)
   const words = inCuts.filter((word) => flubToken(word.word))
   const tokens = words.map((word) => flubToken(word.word))
-  if (words.length < 3) return { cuts, removedSeconds: 0, counts }
+  if (words.length < 3) {
+    return { cuts, removedSeconds: 0, counts, suggested: [] as RemovedMistake[] }
+  }
 
+  type FlubMark = {
+    from: number
+    to: number
+    confidence: MistakeConfidence
+    kind: string
+  }
+  const marks: FlubMark[] = []
+  // Provisional drop map so detectors still skip already-hit words.
   const drop = words.map(() => false)
-  const markRange = (from: number, to: number) => {
+  const markRange = (
+    from: number,
+    to: number,
+    confidence: MistakeConfidence = 'high',
+    kind = 'restart',
+  ) => {
+    if (to <= from) return
     for (let k = from; k < to; k++) drop[k] = true
+    marks.push({ from, to, confidence, kind })
   }
 
   // 1) Correction cues — drop the flubbed utterance and the cue itself.
@@ -894,9 +916,9 @@ export function dropFlubs(
     if (from === i && i > 0) from = utteranceStart(words, i - 1)
     // Guard: never wipe a long stretch on one cue.
     if (i - from > 14 || words[i].start - words[from].start > 7) {
-      markRange(i, cueEnd)
+      markRange(i, cueEnd, 'high', 'cue')
     } else {
-      markRange(from, cueEnd)
+      markRange(from, cueEnd, 'high', 'cue')
     }
     counts.cues += 1
     i = cueEnd - 1
@@ -912,7 +934,7 @@ export function dropFlubs(
     if (after + 1 >= tokens.length) continue
     for (let from = i - 2; from >= Math.max(0, i - 10); from--) {
       if (tokens[from] === tokens[after] && tokens[from + 1] === tokens[after + 1]) {
-        markRange(from, after)
+        markRange(from, after, 'high', 'cue')
         counts.cues += 1
         break
       }
@@ -930,7 +952,7 @@ export function dropFlubs(
     const gap = words[i + 1].start - words[i].start
     const maxGap = isStretchedToken(words[i]) ? 6 : 1.8
     if (gap > maxGap) continue
-    markRange(i, i + 1)
+    markRange(i, i + 1, 'high', 'stutter')
     counts.stutters += 1
   }
 
@@ -976,7 +998,18 @@ export function dropFlubs(
         } else if (intervening > 4) {
           continue
         }
-        markRange(i, j)
+        const exact = intervening === 0 && n >= 3
+        const conf: MistakeConfidence =
+          (n === 1 && intervening === 0) || exact || (n >= 3 && intervening <= 1)
+            ? 'high'
+            : 'low'
+        const kind =
+          n === 1 && intervening === 0
+            ? 'stutter'
+            : exact
+              ? 'restart-exact'
+              : 'restart'
+        markRange(i, j, conf, kind)
         if (n === 1 && intervening === 0) counts.stutters += 1
         else counts.restarts += 1
         i = j - 1
@@ -1017,7 +1050,9 @@ export function dropFlubs(
         extraIsFlub &&
         (k >= 3 || (k >= 2 && brokeOff) || (k === 2 && extra === 0))
       if (!restart) continue
-      markRange(i, j)
+      const conf: MistakeConfidence = k >= 3 && extra <= 1 ? 'high' : 'low'
+      const kind = k >= 3 && extra === 0 ? 'restart-exact' : 'restart'
+      markRange(i, j, conf, kind)
       counts.restarts += 1
       i = j - 1
       break
@@ -1047,7 +1082,9 @@ export function dropFlubs(
       while (k < size && next + k < tokens.length && tokens[i + k] === tokens[next + k]) k += 1
       // Catch 2-word false starts ("this towel … this towel …") and full short redos.
       if (k >= 2 || (k >= 1 && k === size) || (k >= 1 && size <= 2)) {
-        markRange(i, next)
+        const conf: MistakeConfidence =
+          k >= 3 || (k >= 2 && k === size) ? 'high' : 'low'
+        markRange(i, next, conf, 'false-start')
         counts.falseStarts += 1
       } else {
         // Redo picks up partway through: "Because this thing has… This has
@@ -1058,7 +1095,7 @@ export function dropFlubs(
             next + 1 < tokens.length &&
             tokens.slice(o + 1, end + 1).includes(tokens[next + 1])
           ) {
-            markRange(o, next)
+            markRange(o, next, 'low', 'false-start')
             counts.falseStarts += 1
             break
           }
@@ -1128,6 +1165,7 @@ export function dropFlubs(
       }
       const aRemain = a1 - aa + 1
       // Same opener (3+ words), or short incomplete take fully redone (1–2).
+      const leadSkipped = aa !== a0 || bb !== b0
       const shortIncomplete =
         aRemain <= 4 &&
         k >= Math.min(2, aRemain) &&
@@ -1136,11 +1174,46 @@ export function dropFlubs(
       const singleStretched =
         aLen === 1 && k >= 1 && isStretchedToken(words[a0])
       if (!longPrefix && !shortIncomplete && !singleStretched) continue
+      // Exact 4+ word reopeners are high; looser successive matches stay low
+      // so Balanced won't auto-cut good lines that only share an opener.
+      const conf: MistakeConfidence =
+        k >= 4 && !leadSkipped && !shortIncomplete ? 'high' : 'low'
+      const kind = k >= 4 && !leadSkipped ? 'restart-exact' : 'restart'
       // Later take should continue or finish — keep later, drop earlier.
-      markRange(a0, b0)
+      markRange(a0, b0, conf, kind)
       counts.restarts += 1
     }
   }
+
+  // Rebuild drop map from strength — low-confidence becomes suggestions only.
+  drop.fill(false)
+  const appliedCounts = { stutters: 0, restarts: 0, falseStarts: 0, cues: 0 }
+  const suggestedMarks: FlubMark[] = []
+  for (const mark of marks) {
+    if (shouldAutoCut(strength, mark.confidence, mark.kind)) {
+      for (let k = mark.from; k < mark.to; k++) drop[k] = true
+      if (mark.kind === 'stutter') appliedCounts.stutters += 1
+      else if (mark.kind === 'false-start') appliedCounts.falseStarts += 1
+      else if (mark.kind === 'cue') appliedCounts.cues += 1
+      else appliedCounts.restarts += 1
+    } else {
+      suggestedMarks.push(mark)
+    }
+  }
+
+  const spanText = (from: number, to: number) =>
+    words
+      .slice(from, to)
+      .map((w) => w.word)
+      .join(' ')
+
+  const suggested: RemovedMistake[] = suggestedMarks.map((mark) => ({
+    start: Number(words[mark.from].start.toFixed(3)),
+    end: Number(words[mark.to - 1].end.toFixed(3)),
+    text: spanText(mark.from, mark.to),
+    confidence: mark.confidence,
+    kind: mark.kind,
+  }))
 
   const ranges: TimeRange[] = []
   for (let i = 0; i < words.length; i++) {
@@ -1172,32 +1245,46 @@ export function dropFlubs(
     if (end > start + 0.04) ranges.push({ start, end })
     i = j
   }
-  if (!ranges.length) return { cuts, removedSeconds: 0, counts }
+  if (!ranges.length) {
+    return { cuts, removedSeconds: 0, counts: appliedCounts, suggested }
+  }
 
   const next = subtractRanges(cuts, ranges, 0.08)
-  if (!next.length) return { cuts, removedSeconds: 0, counts }
+  if (!next.length) {
+    return { cuts, removedSeconds: 0, counts: appliedCounts, suggested }
+  }
   const length = (list: TimeRange[]) =>
     list.reduce((sum, cut) => sum + Math.max(0, cut.end - cut.start), 0)
-  return { cuts: next, removedSeconds: Math.max(0, length(cuts) - length(next)), counts }
+  return {
+    cuts: next,
+    removedSeconds: Math.max(0, length(cuts) - length(next)),
+    counts: appliedCounts,
+    suggested,
+  }
 }
 
 /**
  * Full retake cleanup pass used by talking-head and rapid-cut.
+ * Light = high-confidence flubs only; Balanced = flubs + take matching;
+ * Strong = everything including low-confidence successive phrases.
  */
 async function removeRetakesCore(input: {
   cuts: Array<{ start: number; end: number }>
   words: TimedWord[]
   durationSeconds: number
   inputPath: string
+  strength?: MistakeStrength
 }): Promise<{
   cuts: Array<{ start: number; end: number }>
   dropped: number
   notes: string[]
+  suggested: RemovedMistake[]
 }> {
+  const strength = normalizeMistakeStrength(input.strength)
   const notes: string[] = []
   if (!input.cuts.length || input.words.length < 4) {
     notes.push('Retake pass: skipped (need transcript words)')
-    return { cuts: input.cuts, dropped: 0, notes }
+    return { cuts: input.cuts, dropped: 0, notes, suggested: [] }
   }
 
   const beforeSeconds = input.cuts.reduce(
@@ -1230,7 +1317,7 @@ async function removeRetakesCore(input: {
   } catch {
     /* fall back to Whisper word times */
   }
-  const flubs = dropFlubs(input.cuts, words, loudness)
+  const flubs = dropFlubs(input.cuts, words, loudness, strength)
   const flubParts = [
     flubs.counts.restarts && `${flubs.counts.restarts} restart${flubs.counts.restarts === 1 ? '' : 's'}`,
     flubs.counts.falseStarts && `${flubs.counts.falseStarts} false start${flubs.counts.falseStarts === 1 ? '' : 's'}`,
@@ -1239,7 +1326,12 @@ async function removeRetakesCore(input: {
   ].filter(Boolean)
   if (flubParts.length) {
     notes.push(
-      `Removed mistakes: ${flubParts.join(', ')} (−${flubs.removedSeconds.toFixed(1)}s)`,
+      `Removed mistakes (${strength}): ${flubParts.join(', ')} (−${flubs.removedSeconds.toFixed(1)}s)`,
+    )
+  }
+  if (flubs.suggested.length) {
+    notes.push(
+      `${flubs.suggested.length} possible mistake${flubs.suggested.length === 1 ? '' : 's'} left for Edit cuts`,
     )
   }
 
@@ -1247,26 +1339,29 @@ async function removeRetakesCore(input: {
   let cuts = expandCutsByWordGaps(flubs.cuts, words, 0.35)
   cuts = await expandCutsBySilence(cuts, input.inputPath)
 
-  // 2) In-cut consecutive similar parts → keep later
-  cuts = trimDoubledTakeCuts(cuts, words, input.durationSeconds)
+  // Light stays conservative — only word-level high-confidence flubs.
+  if (strength !== 'light') {
+    // 2) In-cut consecutive similar parts → keep later
+    cuts = trimDoubledTakeCuts(cuts, words, input.durationSeconds)
 
-  // 3) Sentence-level duplicate phrases (across the whole timeline)
-  cuts = dropRepeatedPhrases(cuts, words)
+    // 3) Sentence-level duplicate phrases (across the whole timeline)
+    cuts = dropRepeatedPhrases(cuts, words)
 
-  // 4) Whole-cut duplicate takes → keep later
-  cuts = dropRepeatedTakes(cuts, words)
+    // 4) Whole-cut duplicate takes → keep later
+    cuts = dropRepeatedTakes(cuts, words)
 
-  // 5) Closing CTA filmed twice → keep first complete
-  cuts = await dropClosingRetake(
-    cuts,
-    words,
-    input.durationSeconds,
-    input.inputPath,
-  )
+    // 5) Closing CTA filmed twice → keep first complete
+    cuts = await dropClosingRetake(
+      cuts,
+      words,
+      input.durationSeconds,
+      input.inputPath,
+    )
+  }
 
   if (!cuts.length) {
     notes.push('Retake pass: no change (guard kept original cuts)')
-    return { cuts: input.cuts, dropped: 0, notes }
+    return { cuts: input.cuts, dropped: 0, notes, suggested: flubs.suggested }
   }
 
   cuts = [...cuts].sort((a, b) => a.start - b.start)
@@ -1289,15 +1384,52 @@ async function removeRetakesCore(input: {
         dropped ? ` (−${dropped} repeat segment${dropped === 1 ? '' : 's'})` : ''
       }${removedSeconds > 0.25 ? `, −${removedSeconds.toFixed(1)}s` : ''}`,
     )
-  } else {
+  } else if (!flubParts.length) {
     notes.push('Retake pass: no duplicate takes detected')
   }
 
-  return { cuts, dropped, notes }
+  return { cuts, dropped, notes, suggested: flubs.suggested }
 }
 
-/** A stretch of the source that Remove mistakes cut out. */
-export type RemovedMistake = { start: number; end: number; text: string }
+/** How hard Remove mistakes cleans retakes. Default balanced. */
+export type MistakeStrength = 'light' | 'balanced' | 'strong'
+
+/** high = safe auto-cut; low = only Strong auto-cuts (others stay as suggestions). */
+export type MistakeConfidence = 'high' | 'low'
+
+/** A stretch of the source that Remove mistakes cut out (or suggested). */
+export type RemovedMistake = {
+  start: number
+  end: number
+  text: string
+  confidence?: MistakeConfidence
+  kind?: string
+}
+
+export function normalizeMistakeStrength(
+  value: unknown,
+): MistakeStrength {
+  if (value === 'light' || value === 'strong' || value === 'balanced') return value
+  return 'balanced'
+}
+
+function shouldAutoCut(
+  strength: MistakeStrength,
+  confidence: MistakeConfidence,
+  kind: string,
+) {
+  if (strength === 'strong') return true
+  if (strength === 'light') {
+    return (
+      confidence === 'high' &&
+      (kind === 'stutter' ||
+        kind === 'cue' ||
+        kind === 'restart-exact')
+    )
+  }
+  // balanced — only high-confidence
+  return confidence === 'high'
+}
 
 /** Keep-cuts minus `minus`, dropping slivers too short to matter. */
 function subtractSpans(
@@ -1332,11 +1464,13 @@ export async function removeRetakes(input: {
   durationSeconds: number
   inputPath: string
   restore?: Array<{ start: number; end: number }>
+  strength?: MistakeStrength
 }): Promise<{
   cuts: Array<{ start: number; end: number }>
   dropped: number
   notes: string[]
   removed: RemovedMistake[]
+  suggested: RemovedMistake[]
 }> {
   const core = await removeRetakesCore(input)
   const firstRemoved = subtractSpans(input.cuts, core.cuts)
@@ -1359,6 +1493,21 @@ export async function removeRetakes(input: {
       .filter((w) => w.end > span.start && w.start < span.end)
       .map((w) => w.word)
       .join(' '),
+    confidence: 'high' as MistakeConfidence,
   }))
-  return { cuts, dropped: core.dropped, notes: core.notes, removed }
+  // Drop suggestions that were actually cut (or put back into a restored span).
+  const suggested = core.suggested.filter(
+    (s) =>
+      !removed.some(
+        (r) =>
+          Math.max(r.start, s.start) < Math.min(r.end, s.end) - 0.05,
+      ),
+  )
+  return {
+    cuts,
+    dropped: core.dropped,
+    notes: core.notes,
+    removed,
+    suggested,
+  }
 }

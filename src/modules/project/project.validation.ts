@@ -9,6 +9,7 @@ import {
   CROP_PRESETS,
   EDITING_MODES,
   KEYFRAME_PRESETS,
+  MISTAKE_STRENGTHS,
   PACING_LEVELS,
   RANDOM_POOL_EFFECTS,
   SILENCE_LEVELS,
@@ -42,6 +43,10 @@ export const projectOptionsSchema = z.object({
   keepAudio: z.boolean(),
   audioNormalize: z.boolean(),
   removeMistakes: z.boolean().optional().default(false),
+  removeMistakesStrength: z
+    .enum(MISTAKE_STRENGTHS)
+    .optional()
+    .default('balanced'),
   cropPreset: z.enum(CROP_PRESETS).default('center'),
   colorGrade: z.enum(COLOR_GRADES).default('clean'),
   fadeInOut: z.boolean().default(true),

@@ -52,6 +52,8 @@ export interface RapidCutResult {
   removedSeconds: number
   /** Stretches Remove mistakes cut out, so the client can put them back. */
   removedMistakes: RemovedMistake[]
+  /** Low-confidence candidates left for Edit cuts (not auto-cut). */
+  suggestedMistakes: RemovedMistake[]
   silenceRanges: Array<{ start: number; end: number }>
   cuts: SpeedCut[]
   segmentSpeedApplied: boolean
@@ -725,6 +727,8 @@ export async function processRapidCut(input: {
   aspectRatio?: '9:16' | '1:1' | '16:9'
   /** Opt-in flub / retake removal */
   removeMistakes?: boolean
+  /** How hard Remove mistakes cleans — light / balanced / strong */
+  removeMistakesStrength?: 'light' | 'balanced' | 'strong'
   /** Mistake stretches from an earlier run that the client put back */
   restoreMistakes?: Array<{ start: number; end: number }>
   /** Client's own add-back and cut-out stretches, applied last */
@@ -780,6 +784,7 @@ export async function processRapidCut(input: {
   // talk and caption-less holds. Music-only clips stay on the energy path.
   let usedTranscript = false
   let removedMistakes: RemovedMistake[] = []
+  let suggestedMistakes: RemovedMistake[] = []
   let transcriptWords: TimedWord[] = []
   let rawTranscriptWords: TimedWord[] = []
   if (env.GROQ_API_KEY) {
@@ -857,8 +862,10 @@ export async function processRapidCut(input: {
                 durationSeconds: duration,
                 inputPath: input.inputPath,
                 restore: input.restoreMistakes,
+                strength: input.removeMistakesStrength,
               })
               removedMistakes = retakePass.removed
+              suggestedMistakes = retakePass.suggested
               spokenCuts = retakePass.cuts
               if (spokenCuts.length < 1) spokenCuts = leftoverClean
               if (retakePass.notes.length) notes.push(...retakePass.notes)
@@ -922,8 +929,10 @@ export async function processRapidCut(input: {
           durationSeconds: duration,
           inputPath: input.inputPath,
           restore: input.restoreMistakes,
+          strength: input.removeMistakesStrength,
         })
         removedMistakes = retakePass.removed
+        suggestedMistakes = retakePass.suggested
         baseCuts = retakePass.cuts
         if (retakePass.notes.length) notes.push(...retakePass.notes)
       }
@@ -1000,10 +1009,14 @@ export async function processRapidCut(input: {
           words: retakeWordSource,
           durationSeconds: duration,
           inputPath: input.inputPath,
+          restore: input.restoreMistakes,
+          strength: input.removeMistakesStrength,
         })
         if (retakePass.cuts.length) {
           baseCuts = retakePass.cuts
           keep = totalKeep(baseCuts)
+          removedMistakes = retakePass.removed
+          suggestedMistakes = retakePass.suggested
           if (retakePass.notes.length) notes.push(...retakePass.notes)
         }
       }
@@ -1123,6 +1136,7 @@ export async function processRapidCut(input: {
     outputDurationSeconds,
     removedSeconds,
     removedMistakes,
+    suggestedMistakes,
     silenceRanges,
     cuts,
     segmentSpeedApplied: sped,
